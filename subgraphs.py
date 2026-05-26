@@ -170,23 +170,31 @@ class SubgraphsChain:
 
 # ----------------------- the partition-function FPRAS -----------------------
 
-def schedule_mu(n: int, mu_target: float) -> List[float]:
+def schedule_mu(n: int, mu_target: float, step_n_mult: int = 1) -> List[float]:
     """Return the schedule (mu_0, mu_1, ..., mu_{r+1}) of eqs (10)-(11):
        mu_0 = 1,
-       mu_k = (n-k)/n  for 1 <= k <= r,
+       mu_k = (denom - k)/denom  for 1 <= k <= r,
        mu_{r+1} = mu_target,
-    where r is the largest integer with (n-r)/n > mu_target.
+    where denom = step_n_mult * n and r is the largest integer with
+    (denom - r)/denom > mu_target.
+
+    `step_n_mult` makes the schedule step size 1/(step_n_mult * n):
+      = 1 (default) is the paper's 1/n step ~ n segments,
+      > 1 is a finer schedule (smaller per-link gap, more segments).
+    Each individual ratio Z'(mu_{k+1})/Z'(mu_k) lives in
+    ( ((d-1)/d)^|odd|, 1 ] which is bounded away from 0 for all
+    step_n_mult >= 1; coarser (step_n_mult < 1) would lose that.
     """
     if not (0.0 <= mu_target <= 1.0):
         raise ValueError("mu_target must be in [0, 1]")
     if mu_target >= 1.0:
         return [1.0]
-    # find r: largest integer 0 <= r <= n with (n-r)/n > mu_target
-    # equivalently r < n*(1 - mu_target), so r = ceil(n*(1-mu_target)) - 1.
-    r = int(math.ceil(n * (1.0 - mu_target))) - 1
+    step_n_mult = max(1, int(step_n_mult))
+    denom = step_n_mult * n
+    r = int(math.ceil(denom * (1.0 - mu_target))) - 1
     r = max(r, 0)
-    sched = [(n - k) / n for k in range(r + 1)]  # mu_0..mu_r
-    sched.append(mu_target)                       # mu_{r+1}
+    sched = [(denom - k) / denom for k in range(r + 1)]
+    sched.append(mu_target)
     return sched
 
 
@@ -204,12 +212,15 @@ def estimate_log_Z(
     V_ij: Optional[Sequence[float]] = None,
     burnin: int = 5_000,
     samples_per_step: int = 20_000,
+    step_n_mult: int = 1,
     rng: Optional[random.Random] = None,
     verbose: bool = False,
 ) -> float:
     """Jerrum-Sinclair FPRAS estimate of log Z(V_ij, B, beta).
 
     Implements Steps 1-3 of the paper.  V_ij defaults to all-ones (J = 1).
+    `step_n_mult` refines the mu schedule (see schedule_mu); =1 is the
+    paper's 1/n step size.
     """
     rng = rng if rng is not None else random.Random()
     if V_ij is None:
@@ -223,7 +234,7 @@ def estimate_log_Z(
     log_Zp_1 = sum(math.log1p(l) for l in lambdas)  # log prod (1 + lambda_ij)
 
     # Step 2: schedule + ratio estimates.
-    sched = schedule_mu(n, mu_target)
+    sched = schedule_mu(n, mu_target, step_n_mult=step_n_mult)
     if verbose:
         print(f"  schedule (length {len(sched)}): mu_0={sched[0]} ... "
               f"mu_{{{len(sched)-1}}}={sched[-1]}")
@@ -255,6 +266,89 @@ def estimate_log_Z(
             print(f"    step {k:3d}: mu {mu_k:.6f} -> {mu_kp1:.6f}  "
                   f"ratio={ratio:.6f}  log_Z={log_Z:.5f}")
     return log_Z
+
+
+def estimate_log_Z_trace(
+    edges: Sequence[Tuple[int, int]],
+    n: int,
+    beta: float,
+    B: float,
+    V_ij: Optional[Sequence[float]] = None,
+    burnin: int = 5_000,
+    samples_per_step: int = 20_000,
+    num_log_samples: int = 60,
+    rng: Optional[random.Random] = None,
+) -> Tuple[float, List[Tuple[int, float]]]:
+    """Like estimate_log_Z but also returns the running log Z estimate at
+    `num_log_samples` log-spaced step counts (cumulative inner-chain steps
+    across burn-ins and sample phases of every schedule segment).
+
+    During a segment's burn-in the running estimate is the committed total
+    so far (the current segment contributes 0); during the sample phase the
+    estimate adds log(running mean of f_k(X)) for the current segment.
+
+    Returns (final_log_Z, [(total_step, log_Z_running), ...]).
+    """
+    rng = rng if rng is not None else random.Random()
+    if V_ij is None:
+        V_ij = [1.0] * len(edges)
+    V_arr = np.asarray(V_ij, dtype=np.float64)
+    lambdas = [math.tanh(beta * v) for v in V_ij]
+    mu_target = math.tanh(beta * B)
+
+    log_A = _log_A(n, V_arr, beta, B)
+    log_Zp_1 = sum(math.log1p(l) for l in lambdas)
+
+    sched = schedule_mu(n, mu_target)
+    n_segments = len(sched) - 1
+    if n_segments <= 0:
+        final = log_A + log_Zp_1
+        return final, [(0, final)]
+
+    total_steps = n_segments * (burnin + samples_per_step)
+    record_steps = np.unique(np.round(
+        np.geomspace(1, total_steps, num=num_log_samples)
+    ).astype(int))
+    record_set = set(int(s) for s in record_steps)
+
+    chain = SubgraphsChain(edges, n, lambdas, sched[0], rng=rng)
+
+    log_Z_committed = log_A + log_Zp_1
+    trace: List[Tuple[int, float]] = []
+    total_t = 0
+
+    for k in range(n_segments):
+        mu_k = sched[k]
+        mu_kp1 = sched[k + 1]
+        chain.set_mu(mu_k)
+        for _ in range(burnin):
+            chain.step()
+            total_t += 1
+            if total_t in record_set:
+                trace.append((total_t, log_Z_committed))
+        ratio_sum = 0.0
+        n_drawn = 0
+        for _ in range(samples_per_step):
+            chain.step()
+            odd = chain.n_odd
+            if mu_k > 0.0:
+                f = (mu_kp1 / mu_k) ** odd
+            else:
+                f = 1.0 if odd == 0 else 0.0
+            ratio_sum += f
+            n_drawn += 1
+            total_t += 1
+            if total_t in record_set:
+                rm = ratio_sum / n_drawn
+                lz = log_Z_committed + math.log(rm) if rm > 0.0 else float("nan")
+                trace.append((total_t, lz))
+        ratio = ratio_sum / samples_per_step
+        if ratio <= 0.0:
+            raise RuntimeError(
+                f"ratio estimate at step k={k} is non-positive: {ratio}. "
+                "Increase samples_per_step.")
+        log_Z_committed += math.log(ratio)
+    return log_Z_committed, trace
 
 
 # ------------------------- brute force (for tests) -------------------------

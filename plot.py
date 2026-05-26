@@ -48,6 +48,9 @@ DATA_DIR = "data"
 GRAPHS_SUBDIR = os.path.join(DATA_DIR, "graphs")
 TRACES_CSV = os.path.join(DATA_DIR, "traces.csv")
 EXACT_CSV = os.path.join(DATA_DIR, "exact.csv")
+LOG_Z_CSV = os.path.join(DATA_DIR, "log_z.csv")
+LOG_Z_BUDGET_CSV = os.path.join(DATA_DIR, "log_z_budget.csv")
+LOG_Z_MCMC_CSV = os.path.join(DATA_DIR, "log_z_mcmc.csv")
 COMBINED_HTML = "convergence.html"
 
 STYLE_MPL = {
@@ -117,6 +120,84 @@ def load_exact(path: str) -> Dict[Tuple[str, float, float], float]:
     with open(path, newline="") as f:
         for row in csv.DictReader(f):
             out[(row["graph_id"], float(row["h"]), float(row["beta"]))] = float(row["exact_E"])
+    return out
+
+
+def load_log_z(path: str) -> Dict[str, Dict[float, Dict[float, Dict[str, float]]]]:
+    """log_z[graph_id][h][beta][method] = log_Z.  Empty if the file is absent."""
+    out: Dict = {}
+    if not os.path.exists(path):
+        return out
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            gid = row["graph_id"]
+            h = float(row["h"])
+            beta = float(row["beta"])
+            method = row["method"]
+            lz = float(row["log_Z"])
+            out.setdefault(gid, {}).setdefault(h, {}).setdefault(beta, {})[method] = lz
+    return out
+
+
+def load_log_z_mcmc(path: str
+                    ) -> Dict[str, Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]]]:
+    """log_z_mcmc[graph_id][h][beta][(init, dyn)] = (steps_array, log_z_array).
+    Derived from data/traces.csv via run_thermo_integration.py."""
+    out: Dict = {}
+    if not os.path.exists(path):
+        return out
+    raw = defaultdict(list)
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            gid = row["graph_id"]
+            h = float(row["h"])
+            beta = float(row["beta"])
+            init = row["init"]
+            dyn = row["dynamics"]
+            step = int(row["step"])
+            lz = float(row["log_z_mcmc"])
+            raw[(gid, h, beta, init, dyn)].append((step, lz))
+    for (gid, h, beta, init, dyn), pairs in raw.items():
+        pairs.sort()
+        steps = np.array([p[0] for p in pairs])
+        lz = np.array([p[1] for p in pairs])
+        (out.setdefault(gid, {}).setdefault(h, {})
+            .setdefault(beta, {})[(init, dyn)]) = (steps, lz)
+    return out
+
+
+def load_log_z_budget(path: str
+                      ) -> Dict[str, Dict[float, Dict[float, Dict[int, List[Dict]]]]]:
+    """log_z_budget[graph_id][h][beta][step_n_mult] = [
+            {m, n_segs, total_steps, log_Z}, ...  (one dict per samples-per-segment)
+       ].  Sorted by total_steps ascending.  Missing/failed runs have log_Z = NaN.
+    If the CSV has no `step_n_mult` column (older format) it's treated as 1."""
+    out: Dict = {}
+    if not os.path.exists(path):
+        return out
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            gid = row["graph_id"]
+            h = float(row["h"])
+            beta = float(row["beta"])
+            step_n_mult = int(row.get("step_n_mult", 1) or 1)
+            try:
+                log_Z = float(row["log_Z"])
+            except ValueError:
+                log_Z = float("nan")
+            rec = dict(
+                m=int(row["samples_per_segment"]),
+                n_segs=int(row["n_segments"]),
+                total_steps=int(row["total_steps"]),
+                log_Z=log_Z,
+            )
+            (out.setdefault(gid, {}).setdefault(h, {})
+                .setdefault(beta, {}).setdefault(step_n_mult, []).append(rec))
+    for gid in out:
+        for h in out[gid]:
+            for beta in out[gid][h]:
+                for s in out[gid][h][beta]:
+                    out[gid][h][beta][s].sort(key=lambda r: r["total_steps"])
     return out
 
 
@@ -312,6 +393,361 @@ def _convergence_figure(graph_id: str, graph_data: Dict,
     return fig, has_exact
 
 
+# ---------- log Z convergence figure ----------
+
+STEP_N_MULT_DASH = {1: "solid", 2: "dash", 4: "dash", 5: "dot", 20: "dot"}
+STEP_N_MULT_WIDTH = {1: 1.6, 2: 1.2, 4: 1.4, 5: 1.2, 20: 1.4}
+STEP_N_MULT_MARKER = {1: "circle", 2: "square", 4: "square", 5: "diamond", 20: "diamond"}
+
+
+def _combined_log_z_figure(graph_id: str, n: int,
+                           log_z_mcmc_for_graph: Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]],
+                           log_z_budget_for_graph: Dict[float, Dict[float, Dict[int, List[Dict]]]],
+                           log_z_final_for_graph: Dict[float, Dict[float, Dict[str, float]]],
+                           betas: List[float], h_values: List[float],
+                           inits: List[str], dyns: List[str]
+                           ) -> Tuple[go.Figure, bool]:
+    """Two sub-panels per h, stacked: MCMC + thermo integration on top,
+    JS FPRAS budget sweep below.  Both use x = total chain steps so the
+    panels are directly comparable.
+      - MCMC thermo at recorded step t for target beta_i:
+            x = (i+1) * t   (i+1 spin chains contribute to the integral)
+      - FPRAS at (beta, m, step_n_mult): x = total_steps from the CSV.
+    y is relative error vs exact log Z when n <= 20, raw log Z otherwise."""
+    has_exact = n <= 20
+    nrows = 2 * len(h_values)
+    titles: List[str] = []
+    for h in h_values:
+        titles.append(f"h = {h}  ·  MCMC + thermodynamic integration")
+        titles.append(f"h = {h}  ·  JS FPRAS budget sweep")
+    fig = make_subplots(rows=nrows, cols=1, subplot_titles=titles,
+                        shared_xaxes=False,
+                        vertical_spacing=0.04)
+    for h_idx, h in enumerate(h_values):
+        mcmc_row = 2 * h_idx + 1
+        fpras_row = 2 * h_idx + 2
+        is_first = (h_idx == 0)
+        h_mcmc = log_z_mcmc_for_graph.get(h, {})
+        h_budget = log_z_budget_for_graph.get(h, {})
+        h_finals = log_z_final_for_graph.get(h, {})
+        for b_idx, beta in enumerate(betas):
+            color = PLOTLY_COLORS[b_idx % len(PLOTLY_COLORS)]
+            if has_exact:
+                exact_lz = h_finals.get(beta, {}).get("exact")
+                if exact_lz is None:
+                    continue
+                denom = abs(exact_lz) if abs(exact_lz) > 1e-12 else 1.0
+            n_chains_for_target = b_idx + 1
+
+            # MCMC thermo on top sub-panel.
+            beta_mcmc = h_mcmc.get(beta, {})
+            for init in inits:
+                for dyn in dyns:
+                    if (init, dyn) not in beta_mcmc:
+                        continue
+                    steps, lz = beta_mcmc[(init, dyn)]
+                    if has_exact:
+                        y = np.maximum(np.abs(lz - exact_lz) / denom, 1e-10)
+                    else:
+                        y = lz
+                    x = steps * n_chains_for_target
+                    group = f"beta={beta} init={init} dyn={dyn}"
+                    fig.add_trace(
+                        go.Scatter(
+                            x=x, y=y, mode="lines",
+                            name=f"β={beta}, {init}, {dyn}",
+                            legendgroup=group, showlegend=is_first,
+                            line=dict(color=color, width=1.4,
+                                      dash=STYLE_PLOTLY[(init, dyn)]),
+                            hovertemplate=(
+                                f"<b>β={beta}, h={h}</b><br>"
+                                f"init={init}, dynamics={dyn}<br>"
+                                "total chain steps=%{x:,}<br>"
+                                "y=%{y:.4g}<extra></extra>"
+                            ),
+                        ),
+                        row=mcmc_row, col=1,
+                    )
+
+            # FPRAS budget on bottom sub-panel.
+            beta_budget = h_budget.get(beta, {})
+            for step_n_mult in sorted(beta_budget.keys()):
+                recs = beta_budget[step_n_mult]
+                xs, ys, hovers = [], [], []
+                for r in recs:
+                    lz = r["log_Z"]
+                    if math.isnan(lz):
+                        continue
+                    if has_exact:
+                        yv = max(abs(lz - exact_lz) / denom, 1e-10)
+                    else:
+                        yv = lz
+                    xs.append(r["total_steps"])
+                    ys.append(yv)
+                    hovers.append(
+                        f"<b>β={beta}, h={h}</b><br>"
+                        f"step = 1/({step_n_mult}n)<br>"
+                        f"samples/segment = {r['m']:,}<br>"
+                        f"n_segments = {r['n_segs']}<br>"
+                        f"total steps = {r['total_steps']:,}<br>"
+                        f"log Ẑ = {lz:.4f}"
+                    )
+                if not xs:
+                    continue
+                symbol = STEP_N_MULT_MARKER.get(step_n_mult, "circle")
+                dash = STEP_N_MULT_DASH.get(step_n_mult, "solid")
+                group = f"beta={beta} step={step_n_mult}"
+                fig.add_trace(
+                    go.Scatter(
+                        x=xs, y=ys, mode="lines+markers",
+                        name=f"β={beta}" + ("" if step_n_mult == 1
+                                            else f"  step 1/{step_n_mult}n"),
+                        legendgroup=group, showlegend=False,
+                        line=dict(color=color, width=1.0, dash=dash),
+                        marker=dict(color=color, size=8, symbol=symbol,
+                                    line=dict(color="white", width=1)),
+                        hovertext=hovers, hoverinfo="text",
+                    ),
+                    row=fpras_row, col=1,
+                )
+        fig.update_xaxes(type="log", title_text="total chain steps",
+                         row=mcmc_row, col=1)
+        fig.update_xaxes(type="log", title_text="total chain steps",
+                         row=fpras_row, col=1)
+        if has_exact:
+            fig.update_yaxes(type="log",
+                             title_text="|log Ẑ − log Z| / |log Z|",
+                             row=mcmc_row, col=1)
+            fig.update_yaxes(type="log",
+                             title_text="|log Ẑ − log Z| / |log Z|",
+                             row=fpras_row, col=1)
+        else:
+            fig.update_yaxes(title_text="log Ẑ", row=mcmc_row, col=1)
+            fig.update_yaxes(title_text="log Ẑ", row=fpras_row, col=1)
+    fig.update_layout(
+        title=dict(text="log Z: MCMC+thermo (top) vs JS FPRAS budget (bottom), per h",
+                   x=0.5, xanchor="center", font=dict(size=12)),
+        height=260 * nrows + 100,
+        hovermode="closest",
+        dragmode="pan",
+        legend=dict(title="(β, init, dyn)  — MCMC only",
+                    itemsizing="constant",
+                    bgcolor="rgba(255,255,255,0.92)",
+                    groupclick="togglegroup"),
+        template="plotly_white",
+    )
+    return fig, has_exact
+
+
+def _log_z_mcmc_figure(graph_id: str,
+                       log_z_mcmc_for_graph: Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]],
+                       log_z_final_for_graph: Dict[float, Dict[float, Dict[str, float]]],
+                       betas: List[float], h_values: List[float],
+                       inits: List[str], dyns: List[str]
+                       ) -> Tuple[go.Figure, bool]:
+    """log Z derived from the spin chains' <E>(beta, step) traces via
+    trapezoidal thermodynamic integration over beta.  Same 4 (init, dyn) x
+    10 beta structure as the energy view; y axis is relative error vs exact
+    log Z when n <= 20."""
+    has_exact = any("exact" in log_z_final_for_graph.get(h, {}).get(beta, {})
+                    for h in h_values for beta in betas)
+    ncols = 3
+    nrows = math.ceil(len(h_values) / ncols)
+    titles = [f"h = {h}" for h in h_values] + [""] * (nrows * ncols - len(h_values))
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=titles,
+                        shared_xaxes=True,
+                        horizontal_spacing=0.07, vertical_spacing=0.12)
+    for h_idx, h in enumerate(h_values):
+        row, col = h_idx // ncols + 1, h_idx % ncols + 1
+        is_first = (h_idx == 0)
+        h_data = log_z_mcmc_for_graph.get(h, {})
+        h_finals = log_z_final_for_graph.get(h, {})
+        for b_idx, beta in enumerate(betas):
+            color = PLOTLY_COLORS[b_idx % len(PLOTLY_COLORS)]
+            beta_data = h_data.get(beta, {})
+            if has_exact:
+                exact_lz = h_finals.get(beta, {}).get("exact")
+                if exact_lz is None:
+                    continue
+                denom = abs(exact_lz) if abs(exact_lz) > 1e-12 else 1.0
+            for init in inits:
+                for dyn in dyns:
+                    if (init, dyn) not in beta_data:
+                        continue
+                    steps, lz = beta_data[(init, dyn)]
+                    if has_exact:
+                        y = np.maximum(np.abs(lz - exact_lz) / denom, 1e-10)
+                    else:
+                        y = lz
+                    group = f"beta={beta} init={init} dyn={dyn}"
+                    fig.add_trace(
+                        go.Scatter(
+                            x=steps, y=y, mode="lines",
+                            name=f"β={beta}, {init}, {dyn}",
+                            legendgroup=group,
+                            showlegend=is_first,
+                            line=dict(color=color, width=1.5,
+                                      dash=STYLE_PLOTLY[(init, dyn)]),
+                            hovertemplate=(
+                                f"<b>β={beta}</b><br>"
+                                f"init={init}<br>"
+                                f"dynamics={dyn}<br>"
+                                f"h={h}<br>"
+                                "steps=%{x:,}<br>"
+                                "y=%{y:.4g}<extra></extra>"
+                            ),
+                        ),
+                        row=row, col=col,
+                    )
+        fig.update_xaxes(type="log", title_text="update steps", row=row, col=col)
+        if has_exact:
+            fig.update_yaxes(type="log",
+                             title_text="|log Ẑ − log Z| / |log Z|",
+                             row=row, col=col)
+        else:
+            fig.update_yaxes(title_text="log Ẑ (thermo)", row=row, col=col)
+    fig.update_layout(
+        title=dict(text=("log Z from MCMC <E>(β) via thermodynamic integration -- "
+                         "relative error vs exact log Z (n ≤ 20)" if has_exact else
+                         "log Z from MCMC <E>(β) via thermodynamic integration "
+                         "(no exact reference for n>20)"),
+                   x=0.5, xanchor="center", font=dict(size=12)),
+        height=320 * nrows + 120,
+        hovermode="closest",
+        dragmode="pan",
+        legend=dict(title="(β, init, dyn)", itemsizing="constant",
+                    bgcolor="rgba(255,255,255,0.92)",
+                    groupclick="togglegroup"),
+        template="plotly_white",
+    )
+    return fig, has_exact
+
+
+def _log_z_figure(graph_id: str, n: int,
+                  log_z_budget_for_graph: Dict[float, Dict[float, Dict[int, List[Dict]]]],
+                  log_z_final_for_graph: Dict[float, Dict[float, Dict[str, float]]],
+                  betas: List[float], h_values: List[float]) -> Tuple[go.Figure, bool]:
+    """FPRAS convergence: each curve is one (β, step_n_mult), plotting final
+    log Ẑ across several independent FPRAS calls at varying `samples_per_segment`.
+    x = total chain steps; y = relative error vs exact log Z when n ≤ 20
+    (log-log), raw log Ẑ otherwise (log-x linear-y).
+    Dash style encodes step_n_mult (solid = paper's 1/n; finer steps dashed/
+    dotted); color encodes β."""
+    has_exact = n <= 20
+    ncols = 3
+    nrows = math.ceil(len(h_values) / ncols)
+    titles = [f"h = {h}" for h in h_values] + [""] * (nrows * ncols - len(h_values))
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=titles,
+                        shared_xaxes=True,
+                        horizontal_spacing=0.07, vertical_spacing=0.14)
+    for h_idx, h in enumerate(h_values):
+        row, col = h_idx // ncols + 1, h_idx % ncols + 1
+        is_first = (h_idx == 0)
+        h_budget = log_z_budget_for_graph.get(h, {})
+        h_finals = log_z_final_for_graph.get(h, {})
+        for b_idx, beta in enumerate(betas):
+            beta_data = h_budget.get(beta) or {}
+            if not beta_data:
+                continue
+            color = PLOTLY_COLORS[b_idx % len(PLOTLY_COLORS)]
+            if has_exact:
+                exact_lz = h_finals.get(beta, {}).get("exact")
+                if exact_lz is None:
+                    continue
+                ref_denom = abs(exact_lz) if abs(exact_lz) > 1e-12 else 1.0
+            for step_n_mult in sorted(beta_data.keys()):
+                recs = beta_data[step_n_mult]
+                xs, ys, hovers = [], [], []
+                for r in recs:
+                    lz = r["log_Z"]
+                    if math.isnan(lz):
+                        continue
+                    if has_exact:
+                        y = max(abs(lz - exact_lz) / ref_denom, 1e-10)
+                    else:
+                        y = lz
+                    xs.append(r["total_steps"])
+                    ys.append(y)
+                    hovers.append(
+                        f"<b>β={beta}, h={h}</b><br>"
+                        f"step = 1/({step_n_mult}n)<br>"
+                        f"samples/segment = {r['m']:,}<br>"
+                        f"n_segments = {r['n_segs']}<br>"
+                        f"total steps = {r['total_steps']:,}<br>"
+                        f"log Ẑ = {lz:.4f}"
+                    )
+                if not xs:
+                    continue
+                dash = STEP_N_MULT_DASH.get(step_n_mult, "solid")
+                width = STEP_N_MULT_WIDTH.get(step_n_mult, 1.4)
+                group = f"beta={beta} step={step_n_mult}"
+                label = (f"β={beta}" if step_n_mult == 1
+                         else f"β={beta}  (step 1/{step_n_mult}n)")
+                fig.add_trace(
+                    go.Scatter(
+                        x=xs, y=ys, mode="lines+markers",
+                        name=label,
+                        legendgroup=group,
+                        showlegend=is_first,
+                        line=dict(color=color, width=width, dash=dash),
+                        marker=dict(color=color, size=7,
+                                    line=dict(color="white", width=1)),
+                        hovertext=hovers,
+                        hoverinfo="text",
+                    ),
+                    row=row, col=col,
+                )
+        fig.update_xaxes(type="log", title_text="total FPRAS chain steps",
+                         row=row, col=col)
+        if has_exact:
+            fig.update_yaxes(type="log",
+                             title_text="|log Ẑ − log Z| / |log Z|",
+                             row=row, col=col)
+        else:
+            fig.update_yaxes(title_text="log Ẑ", row=row, col=col)
+    fig.update_layout(
+        title=dict(text=("FPRAS convergence: relative error vs exact log Z, "
+                         "sweeping samples_per_segment ∈ {100, 300, 1000, 3000, 10000}"
+                         if has_exact else
+                         "FPRAS log Ẑ vs total chain work, "
+                         "sweeping samples_per_segment (no exact reference for n>20)"),
+                   x=0.5, xanchor="center", font=dict(size=12)),
+        height=320 * nrows + 120,
+        hovermode="closest",
+        dragmode="pan",
+        legend=dict(title="β", itemsizing="constant",
+                    bgcolor="rgba(255,255,255,0.92)",
+                    groupclick="togglegroup"),
+        template="plotly_white",
+    )
+    return fig, has_exact
+
+
+def _segments_table_html(graph_id: str,
+                         log_z_budget_for_graph: Dict[float, Dict[float, Dict[int, List[Dict]]]],
+                         betas: List[float], h_values: List[float]) -> str:
+    """Render a small HTML table of n_segments at the paper's 1/n step
+    (step_n_mult=1) for every (h, β) on this graph."""
+    header = ('<tr><th>h \\ β</th>'
+              + ''.join(f'<th>{b}</th>' for b in betas)
+              + '</tr>')
+    body_rows = []
+    for h in h_values:
+        cells = [f'<th>{h}</th>']
+        for beta in betas:
+            recs = (log_z_budget_for_graph.get(h, {})
+                    .get(beta, {}).get(1) or [])
+            cells.append(f'<td>{recs[0]["n_segs"]}</td>' if recs else '<td>-</td>')
+        body_rows.append('<tr>' + ''.join(cells) + '</tr>')
+    return (
+        '<div class="segments-table-wrap" data-view="logz">'
+        '<div class="segments-table-title">Schedule length (number of FPRAS '
+        'segments) at each (h, β) for this graph -- paper\'s 1/n step:</div>'
+        '<table class="segments-table"><thead>' + header + '</thead>'
+        '<tbody>' + ''.join(body_rows) + '</tbody></table></div>'
+    )
+
+
 # ---------- HTML page assembly ----------
 
 PAGE_STYLE = """
@@ -345,6 +781,13 @@ PAGE_STYLE = """
   .graph-section { margin-bottom: 10px; }
   .graph-section.hidden { display: none; }
   .graphfig { margin: 8px 0; }
+  .view-hidden { display: none; }
+  .segments-table-wrap { margin: 10px 0 6px 0; }
+  .segments-table-title { font-size: 12.5px; color: #444; margin-bottom: 4px; }
+  .segments-table { border-collapse: collapse; font-size: 12px; font-family: ui-monospace, Menlo, monospace; }
+  .segments-table th, .segments-table td { border: 1px solid #ccc; padding: 2px 8px; text-align: center; }
+  .segments-table th { background: #f1f1f1; font-weight: 600; }
+  .segments-table tbody th { background: #f7f7f7; }
 </style>
 """
 
@@ -381,27 +824,50 @@ stated for Glauber.</p>
 and −1<sup>n</sup>) and <i>uniform</i> (each spin independently +1 or −1).
 </p>
 </details>
+<details>
+<summary>What are the log Z views?</summary>
+<p>Two separate views, each with 5 h panels.</p>
+<ul>
+<li><b>log Z (MCMC thermo)</b> — same spin chains as the energy view,
+post-processed by trapezoidal integration of ⟨E⟩ over β
+(<code>log Z(β,h) = n·log 2 − ∫₀^β ⟨E⟩(β',h) dβ'</code>).  One line per
+(β, init, dyn); x = per-chain steps.</li>
+<li><b>log Z (JS FPRAS budget)</b> — each marker is one independent full
+FPRAS run at fixed <code>samples_per_segment ∈ {100,300,1000,3000,10000}</code>;
+lines connect runs at the same β.  Dash style encodes the schedule step
+(<code>1/n</code> solid, <code>1/(4n)</code> dashed, <code>1/(20n)</code> dotted).
+x = total FPRAS chain steps = <code>n_segments × (burnin + samples_per_segment)</code>.
+Schedule-length table below the chart.</li>
+</ul>
+<p>For n=16 the y axis is relative error vs exact log Z (log-log); for n=40 raw log Ẑ.</p>
+</details>
 </p>
 """
 
 CONTROLS_HTML_TEMPLATE = """
 <div class="controls">
+  <fieldset id="ctl-view">
+    <legend>View</legend>
+    <label><input type="radio" name="viewsel" checked value="energy"> energy convergence</label>
+    <label><input type="radio" name="viewsel" value="logz_mcmc"> log Z (MCMC thermo)</label>
+    <label><input type="radio" name="viewsel" value="logz_fpras"> log Z (JS FPRAS budget)</label>
+  </fieldset>
   <fieldset id="ctl-graph">
     <legend>Graph</legend>
     {graph_radios}
   </fieldset>
-  <fieldset id="ctl-init">
+  <fieldset id="ctl-init" class="view-only-energy">
     <legend>Initial distribution</legend>
-    <label><input type="checkbox" checked data-filter="init" data-value="ground"> ground</label>
+    <label><input type="checkbox" data-filter="init" data-value="ground"> ground</label>
     <label><input type="checkbox" checked data-filter="init" data-value="uniform"> uniform</label>
     <div class="shortcut-btns">
       <button type="button" onclick="setAll('init', true)">all</button>
       <button type="button" onclick="setAll('init', false)">none</button>
     </div>
   </fieldset>
-  <fieldset id="ctl-dyn">
+  <fieldset id="ctl-dyn" class="view-only-energy">
     <legend>Dynamics</legend>
-    <label><input type="checkbox" checked data-filter="dyn" data-value="metropolis"> metropolis</label>
+    <label><input type="checkbox" data-filter="dyn" data-value="metropolis"> metropolis</label>
     <label><input type="checkbox" checked data-filter="dyn" data-value="glauber"> glauber</label>
     <div class="shortcut-btns">
       <button type="button" onclick="setAll('dyn', true)">all</button>
@@ -421,7 +887,8 @@ CONTROLS_HTML_TEMPLATE = """
 
 CONTROLS_SCRIPT = """
 <script>
-  // legendgroup is encoded in Python as "beta=<x> init=<y> dyn=<z>".
+  // legendgroup encoding: energy traces use "beta=<x> init=<y> dyn=<z>",
+  // log Z traces use "method=<m>".
   function parseGroup(g) {
     if (!g) return null;
     const out = {};
@@ -432,26 +899,50 @@ CONTROLS_SCRIPT = """
     });
     return out;
   }
+  function currentView() {
+    const v = document.querySelector('input[name="viewsel"]:checked');
+    return v ? v.value : 'energy';
+  }
+  // Init/dyn filters apply in any view that contains MCMC traces.
+  const VIEWS_WITH_INIT_DYN = new Set(['energy', 'logz_mcmc']);
+  const PLOT_PREFIXES = ['convfig-', 'logzmcmcfig-', 'logzfig-'];
+
   function applyTraceFilters() {
-    // Only restyle the currently visible chart — restyling all 6 on every
-    // checkbox click is expensive (200 traces each).  When the user switches
-    // graphs we re-apply filters then.
     const initSet = new Set(Array.from(document.querySelectorAll('[data-filter="init"]:checked')).map(e => e.dataset.value));
     const dynSet = new Set(Array.from(document.querySelectorAll('[data-filter="dyn"]:checked')).map(e => e.dataset.value));
     const betaSet = new Set(Array.from(document.querySelectorAll('[data-filter="beta"]:checked')).map(e => e.dataset.value));
     const sel = document.querySelector('input[name="graphsel"]:checked');
     if (!sel) return;
-    const div = document.getElementById('convfig-' + sel.value);
-    if (!div || !div.data) return;
-    const visibility = div.data.map(trace => {
-      const m = parseGroup(trace.legendgroup);
-      if (!m) return true;
-      if (!initSet.has(m.init)) return false;
-      if (!dynSet.has(m.dyn)) return false;
-      if (!betaSet.has(m.beta)) return false;
-      return true;
+    PLOT_PREFIXES.forEach(prefix => {
+      const div = document.getElementById(prefix + sel.value);
+      if (!div || !div.data) return;
+      const visibility = div.data.map(trace => {
+        const m = parseGroup(trace.legendgroup);
+        if (!m) return true;
+        if (m.init !== undefined && !initSet.has(m.init)) return false;
+        if (m.dyn !== undefined && !dynSet.has(m.dyn)) return false;
+        if (m.beta !== undefined && !betaSet.has(m.beta)) return false;
+        return true;
+      });
+      Plotly.restyle(div, {visible: visibility});
     });
-    Plotly.restyle(div, {visible: visibility});
+  }
+  function applyView() {
+    const view = currentView();
+    document.querySelectorAll('[data-view]').forEach(div => {
+      if (div.dataset.view === view) div.classList.remove('view-hidden');
+      else div.classList.add('view-hidden');
+    });
+    document.querySelectorAll('.view-only-energy').forEach(el => {
+      if (VIEWS_WITH_INIT_DYN.has(view)) el.classList.remove('view-hidden');
+      else el.classList.add('view-hidden');
+    });
+    setTimeout(() => {
+      PLOT_PREFIXES.forEach(prefix => {
+        const div = document.querySelector('.graph-section:not(.hidden) [data-view]:not(.view-hidden) [id^="' + prefix + '"]');
+        if (div && window.Plotly && div.layout) Plotly.Plots.resize(div);
+      });
+    }, 50);
   }
   function applyGraphSelection() {
     const sel = document.querySelector('input[name="graphsel"]:checked');
@@ -463,14 +954,14 @@ CONTROLS_SCRIPT = """
         sec.classList.add('hidden');
       }
     });
-    // Plotly sometimes needs a resize after a previously hidden chart appears,
-    // and we need to re-apply the current filter state to the now-visible
-    // chart (we only restyle the visible one on filter changes).
     setTimeout(() => {
-      document.querySelectorAll('.graph-section:not(.hidden) [id^="convfig-"], .graph-section:not(.hidden) [id^="graphfig-"]').forEach(div => {
-        if (window.Plotly && div.layout) Plotly.Plots.resize(div);
+      ['graphfig-'].concat(PLOT_PREFIXES).forEach(prefix => {
+        document.querySelectorAll('.graph-section:not(.hidden) [id^="' + prefix + '"]').forEach(div => {
+          if (window.Plotly && div.layout) Plotly.Plots.resize(div);
+        });
       });
       applyTraceFilters();
+      applyView();
     }, 50);
   }
   document.querySelectorAll('.controls input[type=checkbox]').forEach(cb => {
@@ -479,35 +970,61 @@ CONTROLS_SCRIPT = """
   document.querySelectorAll('input[name="graphsel"]').forEach(r => {
     r.addEventListener('change', applyGraphSelection);
   });
+  document.querySelectorAll('input[name="viewsel"]').forEach(r => {
+    r.addEventListener('change', applyView);
+  });
   function setAll(filter, value) {
     document.querySelectorAll('[data-filter="' + filter + '"]').forEach(cb => cb.checked = value);
     applyTraceFilters();
   }
-  document.addEventListener('DOMContentLoaded', applyGraphSelection);
+  document.addEventListener('DOMContentLoaded', () => {
+    applyGraphSelection();
+    applyView();
+  });
 </script>
 """
 
 
 def _make_section(graph_id: str, n: int, G_nx: nx.Graph, graph_data: Dict,
                   exact: Dict[Tuple[str, float, float], float],
+                  log_z_for_graph: Dict[float, Dict[float, Dict[str, float]]],
+                  log_z_budget_for_graph: Dict[float, Dict[float, Dict[int, List[Dict]]]],
+                  log_z_mcmc_for_graph: Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]],
                   betas: List[float], h_values: List[float],
                   inits: List[str], dyns: List[str],
                   is_default_visible: bool) -> str:
     graph_fig = _graph_figure(G_nx, title=f"{graph_id} — spring layout")
-    conv_fig, has_exact = _convergence_figure(graph_id, graph_data, exact,
-                                              betas, h_values, inits, dyns)
+    conv_fig, _ = _convergence_figure(graph_id, graph_data, exact,
+                                      betas, h_values, inits, dyns)
+    log_z_mcmc_fig, _ = _log_z_mcmc_figure(
+        graph_id, log_z_mcmc_for_graph, log_z_for_graph,
+        betas, h_values, inits, dyns,
+    )
+    log_z_fig, _ = _log_z_figure(
+        graph_id, n, log_z_budget_for_graph, log_z_for_graph,
+        betas, h_values,
+    )
+    seg_table_html = _segments_table_html(graph_id, log_z_budget_for_graph,
+                                          betas, h_values)
     graph_html = graph_fig.to_html(include_plotlyjs=False, full_html=False,
                                    div_id=f"graphfig-{graph_id}")
     conv_html = conv_fig.to_html(include_plotlyjs=False, full_html=False,
                                  div_id=f"convfig-{graph_id}")
-    # Wrap so JS can grab .graphfig / .convfig classes for filtering.
+    log_z_mcmc_html = log_z_mcmc_fig.to_html(include_plotlyjs=False, full_html=False,
+                                             div_id=f"logzmcmcfig-{graph_id}")
+    log_z_html = log_z_fig.to_html(include_plotlyjs=False, full_html=False,
+                                   div_id=f"logzfig-{graph_id}")
     graph_wrap = f'<div class="graphfig">{graph_html}</div>'
-    conv_wrap = f'<div class="convfig">{conv_html}</div>'
+    conv_wrap = f'<div class="convfig" data-view="energy">{conv_html}</div>'
+    log_z_mcmc_wrap = (f'<div class="logzmcmcfig" data-view="logz_mcmc">'
+                       f'{log_z_mcmc_html}</div>')
+    log_z_wrap = (f'<div class="logzfig" data-view="logz_fpras">'
+                  f'{log_z_html}{seg_table_html}</div>')
     section_class = "graph-section" + ("" if is_default_visible else " hidden")
     return (
         f'<section class="{section_class}" data-graph="{graph_id}">'
         f'<h2>{graph_id}  (3-regular, n={n})</h2>'
-        + graph_wrap + conv_wrap +
+        + graph_wrap + conv_wrap + log_z_mcmc_wrap + log_z_wrap +
         '</section>'
     )
 
@@ -515,6 +1032,9 @@ def _make_section(graph_id: str, n: int, G_nx: nx.Graph, graph_data: Dict,
 def render_combined_html(out_path: str,
                          data: Dict, graph_ids: List[str],
                          exact: Dict[Tuple[str, float, float], float],
+                         log_z: Dict[str, Dict[float, Dict[float, Dict[str, float]]]],
+                         log_z_budget: Dict[str, Dict[float, Dict[float, Dict[int, List[Dict]]]]],
+                         log_z_mcmc: Dict[str, Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]]],
                          betas: List[float], h_values: List[float],
                          inits: List[str], dyns: List[str]) -> None:
     # Default-selected graph is the first one (n16_graph0 by ordering).
@@ -525,8 +1045,10 @@ def render_combined_html(out_path: str,
         f'{" checked" if gid == default_selected else ""} value="{gid}"> {gid}</label>'
         for gid in graph_ids
     )
+    default_beta = 0.5
     beta_checkboxes = "".join(
-        f'<label><input type="checkbox" checked data-filter="beta" data-value="{b}"> {b}</label>'
+        f'<label><input type="checkbox"{" checked" if b == default_beta else ""} '
+        f'data-filter="beta" data-value="{b}"> {b}</label>'
         for b in betas
     )
     controls_html = CONTROLS_HTML_TEMPLATE.format(
@@ -540,7 +1062,10 @@ def render_combined_html(out_path: str,
         G_nx = load_graph(gid)
         n = G_nx.number_of_nodes()
         sections.append(_make_section(
-            gid, n, G_nx, data[gid], exact, betas, h_values, inits, dyns,
+            gid, n, G_nx, data[gid], exact,
+            log_z.get(gid, {}), log_z_budget.get(gid, {}),
+            log_z_mcmc.get(gid, {}),
+            betas, h_values, inits, dyns,
             is_default_visible=(gid == default_selected),
         ))
     # Inject plotly.js as the very first script via a stub chart helper or just
@@ -567,8 +1092,14 @@ def render_combined_html(out_path: str,
 def main():
     data, graph_ids, betas, h_values, inits, dyns = load_traces(TRACES_CSV)
     exact = load_exact(EXACT_CSV)
+    log_z = load_log_z(LOG_Z_CSV)
+    log_z_budget = load_log_z_budget(LOG_Z_BUDGET_CSV)
+    log_z_mcmc = load_log_z_mcmc(LOG_Z_MCMC_CSV)
     print(f"loaded {len(graph_ids)} graphs: {graph_ids}")
     print(f"  betas={betas}\n  h={h_values}\n  inits={inits}\n  dyns={dyns}")
+    print(f"  log_z graphs:        {sorted(log_z.keys())}")
+    print(f"  log_z budget graphs: {sorted(log_z_budget.keys())}")
+    print(f"  log_z mcmc graphs:   {sorted(log_z_mcmc.keys())}")
 
     # Per-graph PNG (archival).
     for graph_id in graph_ids:
@@ -580,7 +1111,8 @@ def main():
         print(f"  wrote {png}")
 
     # One combined interactive page.
-    render_combined_html(COMBINED_HTML, data, graph_ids, exact,
+    render_combined_html(COMBINED_HTML, data, graph_ids, exact, log_z,
+                         log_z_budget, log_z_mcmc,
                          betas, h_values, inits, dyns)
     print(f"  wrote {COMBINED_HTML}")
 
