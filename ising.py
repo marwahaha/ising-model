@@ -1,7 +1,30 @@
-"""Single-site Metropolis Markov chain for the ferromagnetic Ising model.
+"""Single-site Markov chains for the ferromagnetic Ising model.
 
 Hamiltonian (with J = 1):
     H(sigma) = - sum_{(i,j) in E} sigma_i sigma_j  -  h * sum_i sigma_i
+
+IsingChain takes a graph (adjacency dict), field strength h, inverse
+temperature beta, an initial distribution, and a dynamics rule.
+
+Initial distributions ("init" argument):
+  - "ground"  : uniform over the two all-aligned ground states
+  - "uniform" : uniform over all 2^|V| spin configurations
+
+Dynamics rules ("dynamics" argument):
+  - "metropolis" : pick a uniform random site v, propose flipping sigma_v;
+                   accept with probability min(1, exp(-beta * dE)).  Every
+                   favorable flip (dE <= 0) is accepted with probability 1.
+  - "glauber"    : pick a uniform random site v, resample sigma_v from its
+                   conditional distribution given neighbours.  Concretely
+                   sigma_v <- +1 with probability sigmoid(2 * beta * h_eff)
+                   where h_eff = (sum of neighbour spins) + h.  No proposal /
+                   rejection -- the new value is drawn independent of the
+                   previous one (conditional on neighbours).
+
+Both dynamics are reversible w.r.t. the Gibbs measure and have the same
+stationary distribution.  step() performs one update under the chosen
+dynamics; run(n) calls step() n times.  energy(), magnetization(),
+local_field(v) and delta_E_flip(v) are observables that do not mutate state.
 """
 
 from __future__ import annotations
@@ -14,16 +37,48 @@ Graph = Dict[Node, List[Node]]
 
 
 class IsingChain:
-    def __init__(self, G: Graph, h: float, beta: float, rng: random.Random | None = None):
+    def __init__(self, G: Graph, h: float, beta: float,
+                 rng: random.Random | None = None,
+                 init: str = "ground",
+                 dynamics: str = "metropolis"):
+        """Build the chain on graph G at field h, inverse temperature beta.
+
+        init: "ground" (uniform over the two all-aligned ground states) or
+              "uniform" (each spin iid +-1 with prob 1/2).
+        dynamics: "metropolis" (propose-and-accept single-site flip) or
+                  "glauber" (resample single site from its conditional given
+                  neighbours).  See module docstring for details.
+        """
         self.G = G
         self.nodes: List[Node] = list(G.keys())
         self.h = float(h)
         self.beta = float(beta)
         self.rng = rng if rng is not None else random.Random()
 
-        # Initial distribution: uniform over the two ground states.
-        s = 1 if self.rng.random() < 0.5 else -1
-        self.sigma: Dict[Node, int] = {v: s for v in self.nodes}
+        if init == "ground":
+            s = 1 if self.rng.random() < 0.5 else -1
+            self.sigma: Dict[Node, int] = {v: s for v in self.nodes}
+        elif init == "uniform":
+            self.sigma = {v: (1 if self.rng.random() < 0.5 else -1) for v in self.nodes}
+        else:
+            raise ValueError(f"unknown init {init!r}; expected 'ground' or 'uniform'")
+
+        if dynamics not in ("metropolis", "glauber"):
+            raise ValueError(f"unknown dynamics {dynamics!r}; expected 'metropolis' or 'glauber'")
+        self.dynamics = dynamics
+
+        # Precompute an undirected edge list (each edge once).  Dedup by value
+        # via a frozenset key -- id-based dedup is unsafe when nodes are
+        # mutable objects (tuples in adjacency lists are recreated copies).
+        seen = set()
+        self._edges: List[Tuple[Node, Node]] = []
+        for v in self.nodes:
+            for u in self.G[v]:
+                key = frozenset((u, v))
+                if key in seen:
+                    continue
+                seen.add(key)
+                self._edges.append((v, u))
 
     # ----- energy helpers -----
 
@@ -40,15 +95,7 @@ class IsingChain:
 
     def energy(self) -> float:
         """Total energy of the current configuration."""
-        bond_sum = 0
-        seen = set()
-        for v in self.nodes:
-            for u in self.G[v]:
-                key = (u, v) if id(u) < id(v) else (v, u)
-                if key in seen:
-                    continue
-                seen.add(key)
-                bond_sum += self.sigma[u] * self.sigma[v]
+        bond_sum = sum(self.sigma[u] * self.sigma[v] for u, v in self._edges)
         return -bond_sum - self.h * sum(self.sigma.values())
 
     def magnetization(self) -> float:
@@ -57,11 +104,23 @@ class IsingChain:
     # ----- the Markov chain -----
 
     def step(self) -> bool:
-        """One single-site Metropolis update. Returns True if the proposal was accepted."""
+        """One single-site update under the configured dynamics.  Returns True
+        if the spin at the selected site actually changed value."""
         v = self.rng.choice(self.nodes)
-        dE = self.delta_E_flip(v)
-        if dE <= 0 or self.rng.random() < pow(2.718281828459045, -self.beta * dE):
-            self.sigma[v] = -self.sigma[v]
+        if self.dynamics == "metropolis":
+            dE = self.delta_E_flip(v)
+            if dE <= 0 or self.rng.random() < pow(2.718281828459045, -self.beta * dE):
+                self.sigma[v] = -self.sigma[v]
+                return True
+            return False
+        # Glauber / heat-bath: resample sigma_v from its conditional.
+        h_eff = self.local_field(v) + self.h
+        # sigmoid(2 beta h_eff) without overflow:
+        z = 2.0 * self.beta * h_eff
+        p_plus = 1.0 / (1.0 + pow(2.718281828459045, -z))
+        new = 1 if self.rng.random() < p_plus else -1
+        if new != self.sigma[v]:
+            self.sigma[v] = new
             return True
         return False
 
