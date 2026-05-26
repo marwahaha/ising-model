@@ -40,7 +40,8 @@ import numpy as np
 from ising import IsingChain, Graph
 
 
-BETAS = [0.1, 0.3, 0.5, 0.8, 1.0, 1.2, 1.5, 2.0, 2.5, 5.0]
+BETAS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
+         1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.8, 2.0, 2.5, 5.0]
 H_VALUES = [0.0, 0.1, 0.2, 0.5, 1.0]
 INITS = ["ground", "uniform"]
 DYNAMICS = ["metropolis", "glauber"]

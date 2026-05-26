@@ -599,7 +599,8 @@ def _log_z_mcmc_figure(graph_id: str,
                         ),
                         row=row, col=col,
                     )
-        fig.update_xaxes(type="log", title_text="update steps", row=row, col=col)
+        fig.update_xaxes(type="log", title_text="update steps per ⟨E⟩",
+                         row=row, col=col)
         if has_exact:
             fig.update_yaxes(type="log",
                              title_text="|log Ẑ − log Z| / |log Z|",
@@ -716,6 +717,165 @@ def _log_z_figure(graph_id: str, n: int,
         hovermode="closest",
         dragmode="pan",
         legend=dict(title="β", itemsizing="constant",
+                    bgcolor="rgba(255,255,255,0.92)",
+                    groupclick="togglegroup"),
+        template="plotly_white",
+    )
+    return fig, has_exact
+
+
+# ---------- wall-time view (note 4): fair comparison of MCMC thermo and FPRAS ----------
+
+# Microbenched on the same machine that produced these CSVs.  Both spin
+# chains and the subgraphs chain are pure Python; numbers vary ~10% with n
+# and β·h, so single representative values are used per kind.
+#   Metropolis (simulate.py inline) : ~1.67 µs/step  =>  1.67 ms / 1000 steps
+#   Glauber    (simulate.py inline) : ~1.90 µs/step  =>  1.90 ms / 1000 steps
+#       (Glauber slightly slower because of the sigmoid; the rule does more
+#        per step than Metropolis' single delta-energy check.)
+#   JS subgraphs (SubgraphsChain)   : ~1.01 µs/step  =>  1.01 ms / 1000 steps
+MCMC_US_PER_STEP = {"metropolis": 1.67, "glauber": 1.90}
+JS_US_PER_STEP = 1.01
+
+
+def _log_z_walltime_figure(graph_id: str, n: int,
+                           log_z_mcmc_for_graph: Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]],
+                           log_z_budget_for_graph: Dict[float, Dict[float, Dict[int, List[Dict]]]],
+                           log_z_final_for_graph: Dict[float, Dict[float, Dict[str, float]]],
+                           betas: List[float], h_values: List[float],
+                           inits: List[str], dyns: List[str]
+                           ) -> Tuple[go.Figure, bool]:
+    """log Z from both estimators on a fair wall-time x-axis.
+
+    For MCMC thermo at recorded step t for target beta_i with dynamics d:
+      wall seconds = (i+1) * t * MCMC_US_PER_STEP[d] / 1e6
+    -- (i+1) spin chains contribute to the integral up to beta_i, each at t
+    steps, at the measured per-step rate for that dynamics.
+
+    For FPRAS at (beta, m, step_n_mult):
+      wall seconds = total_steps * JS_US_PER_STEP / 1e6
+    -- total chain steps for that one full FPRAS run at the measured rate.
+
+    Both shown on the same axes per h panel.  y is relative error vs exact
+    log Z when n <= 20, raw log Z otherwise."""
+    has_exact = n <= 20
+    ncols = 3
+    nrows = math.ceil(len(h_values) / ncols)
+    titles = [f"h = {h}" for h in h_values] + [""] * (nrows * ncols - len(h_values))
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=titles,
+                        shared_xaxes=True, horizontal_spacing=0.07,
+                        vertical_spacing=0.14)
+    for h_idx, h in enumerate(h_values):
+        row, col = h_idx // ncols + 1, h_idx % ncols + 1
+        is_first = (h_idx == 0)
+        h_mcmc = log_z_mcmc_for_graph.get(h, {})
+        h_budget = log_z_budget_for_graph.get(h, {})
+        h_finals = log_z_final_for_graph.get(h, {})
+        for b_idx, beta in enumerate(betas):
+            color = PLOTLY_COLORS[b_idx % len(PLOTLY_COLORS)]
+            if has_exact:
+                exact_lz = h_finals.get(beta, {}).get("exact")
+                if exact_lz is None:
+                    continue
+                denom = abs(exact_lz) if abs(exact_lz) > 1e-12 else 1.0
+            n_chains_for_target = b_idx + 1
+
+            # MCMC thermo lines on the wall-time x-axis.
+            beta_mcmc = h_mcmc.get(beta, {})
+            for init in inits:
+                for dyn in dyns:
+                    if (init, dyn) not in beta_mcmc:
+                        continue
+                    steps, lz = beta_mcmc[(init, dyn)]
+                    if has_exact:
+                        y = np.maximum(np.abs(lz - exact_lz) / denom, 1e-10)
+                    else:
+                        y = lz
+                    us_per_step = MCMC_US_PER_STEP.get(dyn, 2.0)
+                    x_s = (steps * n_chains_for_target * us_per_step / 1e6)
+                    group = f"beta={beta} init={init} dyn={dyn}"
+                    fig.add_trace(
+                        go.Scatter(
+                            x=x_s, y=y, mode="lines",
+                            name=f"MCMC β={beta}, {init}, {dyn}",
+                            legendgroup=group, showlegend=is_first,
+                            line=dict(color=color, width=1.4,
+                                      dash=STYLE_PLOTLY[(init, dyn)]),
+                            hovertemplate=(
+                                f"<b>MCMC thermo β={beta}, h={h}</b><br>"
+                                f"init={init}, dynamics={dyn}<br>"
+                                f"n_chains used = {n_chains_for_target}<br>"
+                                "wall time = %{x:.3g}s<br>"
+                                "y = %{y:.4g}<extra></extra>"
+                            ),
+                        ),
+                        row=row, col=col,
+                    )
+
+            # FPRAS markers on the wall-time x-axis.
+            beta_budget = h_budget.get(beta, {})
+            for step_n_mult in sorted(beta_budget.keys()):
+                recs = beta_budget[step_n_mult]
+                xs, ys, hovers = [], [], []
+                for r in recs:
+                    lz = r["log_Z"]
+                    if math.isnan(lz):
+                        continue
+                    if has_exact:
+                        yv = max(abs(lz - exact_lz) / denom, 1e-10)
+                    else:
+                        yv = lz
+                    x_s = r["total_steps"] * JS_US_PER_STEP / 1e6
+                    xs.append(x_s)
+                    ys.append(yv)
+                    hovers.append(
+                        f"<b>FPRAS β={beta}, h={h}</b><br>"
+                        f"step = 1/({step_n_mult}n)<br>"
+                        f"samples/segment = {r['m']:,}<br>"
+                        f"n_segments = {r['n_segs']}<br>"
+                        f"chain steps = {r['total_steps']:,}<br>"
+                        f"wall time = {x_s:.3g}s<br>"
+                        f"log Ẑ = {lz:.4f}"
+                    )
+                if not xs:
+                    continue
+                symbol = STEP_N_MULT_MARKER.get(step_n_mult, "circle")
+                dash = STEP_N_MULT_DASH.get(step_n_mult, "dot")
+                group = f"beta={beta} step={step_n_mult}"
+                fig.add_trace(
+                    go.Scatter(
+                        x=xs, y=ys, mode="lines+markers",
+                        name=("FPRAS β=" + str(beta)
+                              + ("" if step_n_mult == 1
+                                 else f"  step 1/{step_n_mult}n")),
+                        legendgroup=group, showlegend=is_first,
+                        line=dict(color=color, width=0.9, dash=dash),
+                        marker=dict(color=color, size=9, symbol=symbol,
+                                    line=dict(color="white", width=1.2)),
+                        hovertext=hovers, hoverinfo="text",
+                    ),
+                    row=row, col=col,
+                )
+        fig.update_xaxes(type="log",
+                         title_text="estimated wall time (s)",
+                         row=row, col=col)
+        if has_exact:
+            fig.update_yaxes(type="log",
+                             title_text="|log Ẑ − log Z| / |log Z|",
+                             row=row, col=col)
+        else:
+            fig.update_yaxes(title_text="log Ẑ", row=row, col=col)
+    fig.update_layout(
+        title=dict(text=(
+            "log Z vs estimated wall time -- MCMC thermo lines "
+            f"({MCMC_US_PER_STEP['metropolis']:.2f} µs/step Metropolis, "
+            f"{MCMC_US_PER_STEP['glauber']:.2f} µs/step Glauber); "
+            f"JS FPRAS markers ({JS_US_PER_STEP:.2f} µs/step)"),
+            x=0.5, xanchor="center", font=dict(size=11)),
+        height=320 * nrows + 120,
+        hovermode="closest",
+        dragmode="pan",
+        legend=dict(title="(β, source)", itemsizing="constant",
                     bgcolor="rgba(255,255,255,0.92)",
                     groupclick="togglegroup"),
         template="plotly_white",
@@ -841,6 +1001,15 @@ Schedule-length table below the chart.</li>
 </ul>
 <p>For n=16 the y axis is relative error vs exact log Z (log-log); for n=40 raw log Ẑ.</p>
 </details>
+<details>
+<summary>What is the "log Z vs wall time" view?</summary>
+<p>Both estimators replotted with x = estimated wall time (seconds), so you
+can fairly compare which one reaches a target accuracy faster.  Step rates
+were microbenched on this machine:
+Metropolis ≈ 1.67 µs/step, Glauber ≈ 1.90 µs/step, JS subgraphs ≈ 1.01 µs/step.
+Each MCMC curve has x = (chains_used_for_target_β) · per_chain_steps · µs/step,
+each FPRAS marker has x = total_FPRAS_chain_steps · 1.01 µs.</p>
+</details>
 </p>
 """
 
@@ -851,6 +1020,7 @@ CONTROLS_HTML_TEMPLATE = """
     <label><input type="radio" name="viewsel" checked value="energy"> energy convergence</label>
     <label><input type="radio" name="viewsel" value="logz_mcmc"> log Z (MCMC thermo)</label>
     <label><input type="radio" name="viewsel" value="logz_fpras"> log Z (JS FPRAS budget)</label>
+    <label><input type="radio" name="viewsel" value="logz_walltime"> log Z vs wall time</label>
   </fieldset>
   <fieldset id="ctl-graph">
     <legend>Graph</legend>
@@ -904,8 +1074,8 @@ CONTROLS_SCRIPT = """
     return v ? v.value : 'energy';
   }
   // Init/dyn filters apply in any view that contains MCMC traces.
-  const VIEWS_WITH_INIT_DYN = new Set(['energy', 'logz_mcmc']);
-  const PLOT_PREFIXES = ['convfig-', 'logzmcmcfig-', 'logzfig-'];
+  const VIEWS_WITH_INIT_DYN = new Set(['energy', 'logz_mcmc', 'logz_walltime']);
+  const PLOT_PREFIXES = ['convfig-', 'logzmcmcfig-', 'logzfig-', 'logzwalltimefig-'];
 
   function applyTraceFilters() {
     const initSet = new Set(Array.from(document.querySelectorAll('[data-filter="init"]:checked')).map(e => e.dataset.value));
@@ -1004,6 +1174,10 @@ def _make_section(graph_id: str, n: int, G_nx: nx.Graph, graph_data: Dict,
         graph_id, n, log_z_budget_for_graph, log_z_for_graph,
         betas, h_values,
     )
+    log_z_walltime_fig, _ = _log_z_walltime_figure(
+        graph_id, n, log_z_mcmc_for_graph, log_z_budget_for_graph,
+        log_z_for_graph, betas, h_values, inits, dyns,
+    )
     seg_table_html = _segments_table_html(graph_id, log_z_budget_for_graph,
                                           betas, h_values)
     graph_html = graph_fig.to_html(include_plotlyjs=False, full_html=False,
@@ -1014,17 +1188,22 @@ def _make_section(graph_id: str, n: int, G_nx: nx.Graph, graph_data: Dict,
                                              div_id=f"logzmcmcfig-{graph_id}")
     log_z_html = log_z_fig.to_html(include_plotlyjs=False, full_html=False,
                                    div_id=f"logzfig-{graph_id}")
+    log_z_walltime_html = log_z_walltime_fig.to_html(include_plotlyjs=False, full_html=False,
+                                                     div_id=f"logzwalltimefig-{graph_id}")
     graph_wrap = f'<div class="graphfig">{graph_html}</div>'
     conv_wrap = f'<div class="convfig" data-view="energy">{conv_html}</div>'
     log_z_mcmc_wrap = (f'<div class="logzmcmcfig" data-view="logz_mcmc">'
                        f'{log_z_mcmc_html}</div>')
     log_z_wrap = (f'<div class="logzfig" data-view="logz_fpras">'
                   f'{log_z_html}{seg_table_html}</div>')
+    log_z_walltime_wrap = (f'<div class="logzwalltimefig" data-view="logz_walltime">'
+                           f'{log_z_walltime_html}</div>')
     section_class = "graph-section" + ("" if is_default_visible else " hidden")
     return (
         f'<section class="{section_class}" data-graph="{graph_id}">'
         f'<h2>{graph_id}  (3-regular, n={n})</h2>'
-        + graph_wrap + conv_wrap + log_z_mcmc_wrap + log_z_wrap +
+        + graph_wrap + conv_wrap + log_z_mcmc_wrap
+        + log_z_wrap + log_z_walltime_wrap +
         '</section>'
     )
 
