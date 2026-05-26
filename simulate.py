@@ -5,16 +5,17 @@ later to the `data/` directory:
 
   - data/traces.csv  : long-form running-mean energy trace.  Columns:
         graph_id, n, h, beta, init, dynamics, step, running_mean_E
-  - data/exact.csv   : exact <E>_{beta,h} for n <= 16 graphs, by brute force.
+  - data/exact.csv   : exact <E>_{beta,h} for n <= 20 graphs, by brute force.
         Columns: graph_id, n, h, beta, exact_E
   - data/graphs/n{N}_graph{G}.json : adjacency-list dump of each graph used,
         so plotting can draw the graph itself.
 
-Once these files exist, `plot.py` can regenerate all PNGs and HTML without
-re-running any simulations.
+Incremental:  if traces.csv already exists, the script reads its graph_id
+column and SKIPS any (n, g_idx) whose graph_id is already present.  New
+rows are appended.  To force a full re-run, delete the data/ directory
+first.
 
-Configuration is in the constants at the top of this file.  Re-running
-simulate.py overwrites the CSVs.
+Configuration is in the constants at the top of this file.
 
 Initial distributions ("init"):
   - "ground"  : uniform over the two all-aligned ground states
@@ -45,8 +46,10 @@ INITS = ["ground", "uniform"]
 DYNAMICS = ["metropolis", "glauber"]
 N_STEPS = 400_000
 NUM_LOG_SAMPLES = 120
-SIZES_AND_SEEDS = [(16, 100), (40, 200)]   # (n, base_seed_for_graphs)
-NUM_GRAPHS = 3
+# (n, base_seed_for_graphs, num_graphs).  We use 13 graphs at n=16 so the
+# convergence behaviour can be inspected across several random 3-regular
+# topologies of the smaller size where exact <E> is tractable.
+SIZES_SEEDS_COUNTS = [(16, 100, 13), (40, 200, 3)]
 
 DATA_DIR = "data"
 GRAPHS_SUBDIR = os.path.join(DATA_DIR, "graphs")
@@ -130,32 +133,56 @@ def run_chain_recording(
     return steps_axis, running_mean
 
 
+def _existing_graph_ids(path: str) -> set:
+    """Return the set of graph_id values already present in a CSV with a
+    'graph_id' column.  Returns empty set if the file is missing."""
+    out = set()
+    if not os.path.exists(path):
+        return out
+    with open(path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            out.add(row["graph_id"])
+    return out
+
+
 def main():
     os.makedirs(GRAPHS_SUBDIR, exist_ok=True)
     record_at = _log_record_steps(N_STEPS, NUM_LOG_SAMPLES)
     record_at_set = set(int(s) for s in record_at)
 
-    with open(TRACES_CSV, "w", newline="") as ft, \
-         open(EXACT_CSV, "w", newline="") as fe:
-        traces_writer = csv.writer(ft)
-        traces_writer.writerow(["graph_id", "n", "h", "beta", "init",
-                                "dynamics", "step", "running_mean_E"])
-        exact_writer = csv.writer(fe)
-        exact_writer.writerow(["graph_id", "n", "h", "beta", "exact_E"])
+    existing_traces = _existing_graph_ids(TRACES_CSV)
+    existing_exact = _existing_graph_ids(EXACT_CSV)
+    print(f"existing graph_ids in traces.csv: {sorted(existing_traces)}")
 
-        for n, base_seed in SIZES_AND_SEEDS:
-            for g_idx in range(NUM_GRAPHS):
+    traces_exists = os.path.exists(TRACES_CSV)
+    exact_exists = os.path.exists(EXACT_CSV)
+    ft = open(TRACES_CSV, "a" if traces_exists else "w", newline="")
+    fe = open(EXACT_CSV, "a" if exact_exists else "w", newline="")
+    try:
+        traces_writer = csv.writer(ft)
+        exact_writer = csv.writer(fe)
+        if not traces_exists:
+            traces_writer.writerow(["graph_id", "n", "h", "beta", "init",
+                                    "dynamics", "step", "running_mean_E"])
+        if not exact_exists:
+            exact_writer.writerow(["graph_id", "n", "h", "beta", "exact_E"])
+
+        for n, base_seed, num_graphs in SIZES_SEEDS_COUNTS:
+            for g_idx in range(num_graphs):
                 graph_id = f"n{n}_graph{g_idx}"
+                if graph_id in existing_traces:
+                    print(f"  skipping {graph_id} (already in traces.csv)")
+                    continue
                 G_nx = nx.random_regular_graph(d=3, n=n, seed=base_seed + g_idx)
-                # Save the graph (adjacency list).
                 with open(os.path.join(GRAPHS_SUBDIR, f"{graph_id}.json"), "w") as fj:
                     json.dump({"n": n, "g_idx": g_idx,
                                "edges": [list(e) for e in G_nx.edges()]}, fj)
                 edges = list(G_nx.edges())
                 G = nx_to_adj(G_nx)
 
-                # Brute-force exact only for small n.
-                if n <= 20:
+                # Brute-force exact only for small n, and only if not already done.
+                if n <= 20 and graph_id not in existing_exact:
                     for h in H_VALUES:
                         for beta in BETAS:
                             E_exact = exact_expected_energy(edges, n, beta, h=h)
@@ -182,6 +209,9 @@ def main():
                                         [graph_id, n, h, beta, init, dyn, s, f"{m:.6g}"]
                                     )
                             ft.flush()
+    finally:
+        ft.close()
+        fe.close()
 
     print(f"\nwrote {TRACES_CSV}")
     print(f"wrote {EXACT_CSV}")
