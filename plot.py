@@ -49,8 +49,42 @@ GRAPHS_SUBDIR = os.path.join(DATA_DIR, "graphs")
 TRACES_CSV = os.path.join(DATA_DIR, "traces.csv")
 EXACT_CSV = os.path.join(DATA_DIR, "exact.csv")
 LOG_Z_CSV = os.path.join(DATA_DIR, "log_z.csv")
-LOG_Z_BUDGET_CSV = os.path.join(DATA_DIR, "log_z_budget.csv")
+LOG_Z_JS_SWEEP_CSV = os.path.join(DATA_DIR, "log_z_js_sweep.csv")
 LOG_Z_MCMC_CSV = os.path.join(DATA_DIR, "log_z_mcmc.csv")
+LOG_Z_TAYLOR_CSV = os.path.join(DATA_DIR, "log_z_taylor.csv")
+REFERENCE_E_CSV = os.path.join(DATA_DIR, "reference_E.csv")
+REFERENCE_LOGZ_CSV = os.path.join(DATA_DIR, "reference_logz.csv")
+# n above which brute-force exact is intractable; for these graphs the
+# "reference" comes from a 5x-longer Glauber/uniform run (run_reference.py).
+EXACT_MAX_N = 20
+VENDOR_DIR = "vendor"
+PLOTLY_LOCAL_JS = os.path.join(VENDOR_DIR, "plotly.min.js")
+PLOTLY_CDN_URL = "https://cdn.plot.ly/plotly-2.35.2.min.js"
+
+
+def _fig_lazy_html(fig: go.Figure, div_id: str) -> str:
+    """Emit an empty div + a `<script type="application/json">` carrying the
+    figure spec.  The JS in CONTROLS_SCRIPT renders each figure with
+    Plotly.newPlot only when its section/view becomes visible, which keeps
+    initial page load from running Plotly on 16 * 5 charts at once."""
+    spec = fig.to_json()
+    spec = spec.replace("</", "<\\/")
+    return (
+        f'<div id="{div_id}" class="plotly-lazy"></div>'
+        f'<script type="application/json" data-figdiv="{div_id}">'
+        f'{spec}</script>'
+    )
+
+
+def _ensure_plotly_js() -> None:
+    """Fetch plotly.min.js into VENDOR_DIR once, so convergence.html can be
+    viewed offline.  No-op if the file already exists."""
+    if os.path.exists(PLOTLY_LOCAL_JS):
+        return
+    os.makedirs(VENDOR_DIR, exist_ok=True)
+    import urllib.request
+    print(f"  fetching {PLOTLY_CDN_URL} -> {PLOTLY_LOCAL_JS}")
+    urllib.request.urlretrieve(PLOTLY_CDN_URL, PLOTLY_LOCAL_JS)
 COMBINED_HTML = "convergence.html"
 
 STYLE_MPL = {
@@ -139,6 +173,34 @@ def load_log_z(path: str) -> Dict[str, Dict[float, Dict[float, Dict[str, float]]
     return out
 
 
+def load_reference_E(path: str) -> Dict[Tuple[str, float, float], float]:
+    """reference <E>(graph, h, beta) from the long Glauber/uniform run, in
+    the same shape as load_exact so it can back-fill the exact dict for
+    graphs too big to brute-force."""
+    out: Dict[Tuple[str, float, float], float] = {}
+    if not os.path.exists(path):
+        return out
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            out[(row["graph_id"], float(row["h"]), float(row["beta"]))] = \
+                float(row["ref_E"])
+    return out
+
+
+def load_reference_logz(path: str) -> Dict[str, Dict[float, Dict[float, float]]]:
+    """reference log Z(graph, h, beta) thermo-integrated from the long
+    Glauber/uniform <E>.  ref[gid][h][beta] = log_Z."""
+    out: Dict = {}
+    if not os.path.exists(path):
+        return out
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            out.setdefault(row["graph_id"], {}) \
+               .setdefault(float(row["h"]), {})[float(row["beta"])] = \
+                float(row["ref_log_Z"])
+    return out
+
+
 def load_log_z_mcmc(path: str
                     ) -> Dict[str, Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]]]:
     """log_z_mcmc[graph_id][h][beta][(init, dyn)] = (steps_array, log_z_array).
@@ -166,9 +228,9 @@ def load_log_z_mcmc(path: str
     return out
 
 
-def load_log_z_budget(path: str
+def load_log_z_js_sweep(path: str
                       ) -> Dict[str, Dict[float, Dict[float, Dict[int, List[Dict]]]]]:
-    """log_z_budget[graph_id][h][beta][step_n_mult] = [
+    """log_z_js_sweep[graph_id][h][beta][step_n_mult] = [
             {m, n_segs, total_steps, log_Z}, ...  (one dict per samples-per-segment)
        ].  Sorted by total_steps ascending.  Missing/failed runs have log_Z = NaN.
     If the CSV has no `step_n_mult` column (older format) it's treated as 1."""
@@ -198,6 +260,45 @@ def load_log_z_budget(path: str
             for beta in out[gid][h]:
                 for s in out[gid][h][beta]:
                     out[gid][h][beta][s].sort(key=lambda r: r["total_steps"])
+    return out
+
+
+def load_log_z_taylor(path: str
+                   ) -> Dict[str, Dict[float, Dict[float, Dict[str, List[Dict]]]]]:
+    """log_z_taylor[graph_id][h][beta][method] = [{m, log_Z, log_Z_exact, rel_err,
+        bound, runtime_s}, ...]  sorted by m ascending.  Missing/timed-out
+    cells appear as NaN in log_Z / rel_err."""
+    out: Dict = {}
+    if not os.path.exists(path):
+        return out
+
+    def _maybe_float(s: str) -> float:
+        try:
+            return float(s)
+        except (ValueError, TypeError):
+            return float("nan")
+
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            gid = row["graph_id"]
+            h = float(row["h"])
+            beta = float(row["beta"])
+            method = row["method"]
+            rec = dict(
+                m=int(row["m"]),
+                log_Z=_maybe_float(row["log_Z"]),
+                log_Z_exact=_maybe_float(row["log_Z_exact"]),
+                rel_err=_maybe_float(row["rel_err"]),
+                bound=_maybe_float(row["error_bound"]),
+                runtime_s=_maybe_float(row["runtime_s"]),
+            )
+            (out.setdefault(gid, {}).setdefault(h, {})
+                .setdefault(beta, {}).setdefault(method, []).append(rec))
+    for gid in out:
+        for h in out[gid]:
+            for beta in out[gid][h]:
+                for method in out[gid][h][beta]:
+                    out[gid][h][beta][method].sort(key=lambda r: r["m"])
     return out
 
 
@@ -402,24 +503,26 @@ STEP_N_MULT_MARKER = {1: "circle", 2: "square", 4: "square", 5: "diamond", 20: "
 
 def _combined_log_z_figure(graph_id: str, n: int,
                            log_z_mcmc_for_graph: Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]],
-                           log_z_budget_for_graph: Dict[float, Dict[float, Dict[int, List[Dict]]]],
+                           log_z_js_sweep_for_graph: Dict[float, Dict[float, Dict[int, List[Dict]]]],
                            log_z_final_for_graph: Dict[float, Dict[float, Dict[str, float]]],
                            betas: List[float], h_values: List[float],
                            inits: List[str], dyns: List[str]
                            ) -> Tuple[go.Figure, bool]:
     """Two sub-panels per h, stacked: MCMC + thermo integration on top,
-    JS FPRAS budget sweep below.  Both use x = total chain steps so the
+    Jerrum-Sinclair sweep below.  Both use x = total chain steps so the
     panels are directly comparable.
       - MCMC thermo at recorded step t for target beta_i:
             x = (i+1) * t   (i+1 spin chains contribute to the integral)
       - FPRAS at (beta, m, step_n_mult): x = total_steps from the CSV.
-    y is relative error vs exact log Z when n <= 20, raw log Z otherwise."""
-    has_exact = n <= 20
+    y is relative error vs the reference log Z (brute-force for n <= 20,
+    long-Glauber thermo for larger n) when available, raw log Z otherwise."""
+    has_exact = any("exact" in log_z_final_for_graph.get(h, {}).get(beta, {})
+                    for h in h_values for beta in betas)
     nrows = 2 * len(h_values)
     titles: List[str] = []
     for h in h_values:
         titles.append(f"h = {h}  ·  MCMC + thermodynamic integration")
-        titles.append(f"h = {h}  ·  JS FPRAS budget sweep")
+        titles.append(f"h = {h}  ·  Jerrum-Sinclair sweep")
     fig = make_subplots(rows=nrows, cols=1, subplot_titles=titles,
                         shared_xaxes=False,
                         vertical_spacing=0.04)
@@ -428,7 +531,7 @@ def _combined_log_z_figure(graph_id: str, n: int,
         fpras_row = 2 * h_idx + 2
         is_first = (h_idx == 0)
         h_mcmc = log_z_mcmc_for_graph.get(h, {})
-        h_budget = log_z_budget_for_graph.get(h, {})
+        h_js_sweep = log_z_js_sweep_for_graph.get(h, {})
         h_finals = log_z_final_for_graph.get(h, {})
         for b_idx, beta in enumerate(betas):
             color = PLOTLY_COLORS[b_idx % len(PLOTLY_COLORS)]
@@ -470,9 +573,9 @@ def _combined_log_z_figure(graph_id: str, n: int,
                     )
 
             # FPRAS budget on bottom sub-panel.
-            beta_budget = h_budget.get(beta, {})
-            for step_n_mult in sorted(beta_budget.keys()):
-                recs = beta_budget[step_n_mult]
+            beta_js_sweep = h_js_sweep.get(beta, {})
+            for step_n_mult in sorted(beta_js_sweep.keys()):
+                recs = beta_js_sweep[step_n_mult]
                 xs, ys, hovers = [], [], []
                 for r in recs:
                     lz = r["log_Z"]
@@ -525,7 +628,7 @@ def _combined_log_z_figure(graph_id: str, n: int,
             fig.update_yaxes(title_text="log Ẑ", row=mcmc_row, col=1)
             fig.update_yaxes(title_text="log Ẑ", row=fpras_row, col=1)
     fig.update_layout(
-        title=dict(text="log Z: MCMC+thermo (top) vs JS FPRAS budget (bottom), per h",
+        title=dict(text="log Z: MCMC+thermo (top) vs Jerrum-Sinclair sweep (bottom), per h",
                    x=0.5, xanchor="center", font=dict(size=12)),
         height=260 * nrows + 100,
         hovermode="closest",
@@ -539,7 +642,7 @@ def _combined_log_z_figure(graph_id: str, n: int,
     return fig, has_exact
 
 
-def _log_z_mcmc_figure(graph_id: str,
+def _log_z_mcmc_figure(graph_id: str, n: int,
                        log_z_mcmc_for_graph: Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]],
                        log_z_final_for_graph: Dict[float, Dict[float, Dict[str, float]]],
                        betas: List[float], h_values: List[float],
@@ -547,10 +650,12 @@ def _log_z_mcmc_figure(graph_id: str,
                        ) -> Tuple[go.Figure, bool]:
     """log Z derived from the spin chains' <E>(beta, step) traces via
     trapezoidal thermodynamic integration over beta.  Same 4 (init, dyn) x
-    10 beta structure as the energy view; y axis is relative error vs exact
-    log Z when n <= 20."""
-    has_exact = any("exact" in log_z_final_for_graph.get(h, {}).get(beta, {})
-                    for h in h_values for beta in betas)
+    10 beta structure as the energy view.  y axis is relative error vs exact
+    log Z for n <= EXACT_MAX_N (true brute force); for larger n there is no
+    reliable exact reference (the long-Glauber pseudo-truth drifts up to
+    ~18% at high beta from coarse-grid thermo integration), so y is the raw
+    log Ẑ over steps."""
+    has_exact = n <= EXACT_MAX_N
     ncols = 3
     nrows = math.ceil(len(h_values) / ncols)
     titles = [f"h = {h}" for h in h_values] + [""] * (nrows * ncols - len(h_values))
@@ -584,18 +689,13 @@ def _log_z_mcmc_figure(graph_id: str,
                         go.Scatter(
                             x=steps, y=y, mode="lines",
                             name=f"β={beta}, {init}, {dyn}",
-                            legendgroup=group,
-                            showlegend=is_first,
+                            legendgroup=group, showlegend=is_first,
                             line=dict(color=color, width=1.5,
                                       dash=STYLE_PLOTLY[(init, dyn)]),
                             hovertemplate=(
-                                f"<b>β={beta}</b><br>"
-                                f"init={init}<br>"
-                                f"dynamics={dyn}<br>"
-                                f"h={h}<br>"
-                                "steps=%{x:,}<br>"
-                                "y=%{y:.4g}<extra></extra>"
-                            ),
+                                f"<b>β={beta}</b><br>init={init}<br>"
+                                f"dynamics={dyn}<br>h={h}<br>steps=%{{x:,}}<br>"
+                                "y=%{y:.4g}<extra></extra>"),
                         ),
                         row=row, col=col,
                     )
@@ -608,10 +708,11 @@ def _log_z_mcmc_figure(graph_id: str,
         else:
             fig.update_yaxes(title_text="log Ẑ (thermo)", row=row, col=col)
     fig.update_layout(
-        title=dict(text=("log Z from MCMC <E>(β) via thermodynamic integration -- "
-                         "relative error vs exact log Z (n ≤ 20)" if has_exact else
-                         "log Z from MCMC <E>(β) via thermodynamic integration "
-                         "(no exact reference for n>20)"),
+        title=dict(text=("log Z from MCMC ⟨E⟩(β) via thermodynamic integration "
+                         "— relative error vs exact log Z (n ≤ 20)" if has_exact
+                         else "log Z from MCMC ⟨E⟩(β) via thermodynamic "
+                         "integration — log Ẑ over steps (no exact reference "
+                         "for n > 20)"),
                    x=0.5, xanchor="center", font=dict(size=12)),
         height=320 * nrows + 120,
         hovermode="closest",
@@ -625,16 +726,17 @@ def _log_z_mcmc_figure(graph_id: str,
 
 
 def _log_z_figure(graph_id: str, n: int,
-                  log_z_budget_for_graph: Dict[float, Dict[float, Dict[int, List[Dict]]]],
+                  log_z_js_sweep_for_graph: Dict[float, Dict[float, Dict[int, List[Dict]]]],
                   log_z_final_for_graph: Dict[float, Dict[float, Dict[str, float]]],
                   betas: List[float], h_values: List[float]) -> Tuple[go.Figure, bool]:
     """FPRAS convergence: each curve is one (β, step_n_mult), plotting final
-    log Ẑ across several independent FPRAS calls at varying `samples_per_segment`.
-    x = total chain steps; y = relative error vs exact log Z when n ≤ 20
-    (log-log), raw log Ẑ otherwise (log-x linear-y).
+    log Ẑ across several independent FPRAS calls at varying
+    `samples_per_segment`.  x = total chain steps; y = relative error vs
+    exact log Z for n <= EXACT_MAX_N (true brute force, log-log), raw log Ẑ
+    otherwise (log-x linear-y; no reliable exact reference for n > 20).
     Dash style encodes step_n_mult (solid = paper's 1/n; finer steps dashed/
     dotted); color encodes β."""
-    has_exact = n <= 20
+    has_exact = n <= EXACT_MAX_N
     ncols = 3
     nrows = math.ceil(len(h_values) / ncols)
     titles = [f"h = {h}" for h in h_values] + [""] * (nrows * ncols - len(h_values))
@@ -644,10 +746,10 @@ def _log_z_figure(graph_id: str, n: int,
     for h_idx, h in enumerate(h_values):
         row, col = h_idx // ncols + 1, h_idx % ncols + 1
         is_first = (h_idx == 0)
-        h_budget = log_z_budget_for_graph.get(h, {})
+        h_js_sweep = log_z_js_sweep_for_graph.get(h, {})
         h_finals = log_z_final_for_graph.get(h, {})
         for b_idx, beta in enumerate(betas):
-            beta_data = h_budget.get(beta) or {}
+            beta_data = h_js_sweep.get(beta) or {}
             if not beta_data:
                 continue
             color = PLOTLY_COLORS[b_idx % len(PLOTLY_COLORS)]
@@ -686,15 +788,12 @@ def _log_z_figure(graph_id: str, n: int,
                          else f"β={beta}  (step 1/{step_n_mult}n)")
                 fig.add_trace(
                     go.Scatter(
-                        x=xs, y=ys, mode="lines+markers",
-                        name=label,
-                        legendgroup=group,
-                        showlegend=is_first,
+                        x=xs, y=ys, mode="lines+markers", name=label,
+                        legendgroup=group, showlegend=is_first,
                         line=dict(color=color, width=width, dash=dash),
                         marker=dict(color=color, size=7,
                                     line=dict(color="white", width=1)),
-                        hovertext=hovers,
-                        hoverinfo="text",
+                        hovertext=hovers, hoverinfo="text",
                     ),
                     row=row, col=col,
                 )
@@ -710,8 +809,8 @@ def _log_z_figure(graph_id: str, n: int,
         title=dict(text=("FPRAS convergence: relative error vs exact log Z, "
                          "sweeping samples_per_segment ∈ {100, 300, 1000, 3000, 10000}"
                          if has_exact else
-                         "FPRAS log Ẑ vs total chain work, "
-                         "sweeping samples_per_segment (no exact reference for n>20)"),
+                         "FPRAS log Ẑ vs total chain work, sweeping "
+                         "samples_per_segment (no exact reference for n > 20)"),
                    x=0.5, xanchor="center", font=dict(size=12)),
         height=320 * nrows + 120,
         hovermode="closest",
@@ -726,22 +825,29 @@ def _log_z_figure(graph_id: str, n: int,
 
 # ---------- wall-time view (note 4): fair comparison of MCMC thermo and FPRAS ----------
 
-# Microbenched on the same machine that produced these CSVs.  Both spin
-# chains and the subgraphs chain are pure Python; numbers vary ~10% with n
-# and β·h, so single representative values are used per kind.
-#   Metropolis (simulate.py inline) : ~1.67 µs/step  =>  1.67 ms / 1000 steps
-#   Glauber    (simulate.py inline) : ~1.90 µs/step  =>  1.90 ms / 1000 steps
-#       (Glauber slightly slower because of the sigmoid; the rule does more
-#        per step than Metropolis' single delta-energy check.)
-#   JS subgraphs (SubgraphsChain)   : ~1.01 µs/step  =>  1.01 ms / 1000 steps
-MCMC_US_PER_STEP = {"metropolis": 1.67, "glauber": 1.90}
-JS_US_PER_STEP = 1.01
+# Microbenched per graph size on the machine that produced these CSVs
+# (run_microbench.py, measured with nothing else running).  Per-step cost
+# does drift a little with n, so we keep a number per size and pick the
+# nearest measured size for the graph being plotted.
+#   { n : {"metropolis": µs, "glauber": µs, "js": µs} }
+US_PER_STEP_BY_N = {
+    16: {"metropolis": 1.547, "glauber": 1.421, "js": 0.553},
+    30: {"metropolis": 1.407, "glauber": 1.344, "js": 0.547},
+    40: {"metropolis": 1.46, "glauber": 1.381, "js": 0.547},
+}
+
+
+def _us_per_step(n: int) -> Dict[str, float]:
+    """Step rates for the measured size nearest to n."""
+    nearest = min(US_PER_STEP_BY_N, key=lambda k: abs(k - n))
+    return US_PER_STEP_BY_N[nearest]
 
 
 def _log_z_walltime_figure(graph_id: str, n: int,
                            log_z_mcmc_for_graph: Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]],
-                           log_z_budget_for_graph: Dict[float, Dict[float, Dict[int, List[Dict]]]],
+                           log_z_js_sweep_for_graph: Dict[float, Dict[float, Dict[int, List[Dict]]]],
                            log_z_final_for_graph: Dict[float, Dict[float, Dict[str, float]]],
+                           log_z_taylor_for_graph: Dict[float, Dict[float, Dict[str, List[Dict]]]],
                            betas: List[float], h_values: List[float],
                            inits: List[str], dyns: List[str]
                            ) -> Tuple[go.Figure, bool]:
@@ -757,8 +863,10 @@ def _log_z_walltime_figure(graph_id: str, n: int,
     -- total chain steps for that one full FPRAS run at the measured rate.
 
     Both shown on the same axes per h panel.  y is relative error vs exact
-    log Z when n <= 20, raw log Z otherwise."""
-    has_exact = n <= 20
+    log Z for n <= EXACT_MAX_N (true brute force); raw log Z otherwise (no
+    reliable exact reference for n > 20)."""
+    has_exact = n <= EXACT_MAX_N
+    rates = _us_per_step(n)
     ncols = 3
     nrows = math.ceil(len(h_values) / ncols)
     titles = [f"h = {h}" for h in h_values] + [""] * (nrows * ncols - len(h_values))
@@ -769,8 +877,9 @@ def _log_z_walltime_figure(graph_id: str, n: int,
         row, col = h_idx // ncols + 1, h_idx % ncols + 1
         is_first = (h_idx == 0)
         h_mcmc = log_z_mcmc_for_graph.get(h, {})
-        h_budget = log_z_budget_for_graph.get(h, {})
+        h_js_sweep = log_z_js_sweep_for_graph.get(h, {})
         h_finals = log_z_final_for_graph.get(h, {})
+        h_taylor = log_z_taylor_for_graph.get(h, {})
         for b_idx, beta in enumerate(betas):
             color = PLOTLY_COLORS[b_idx % len(PLOTLY_COLORS)]
             if has_exact:
@@ -791,7 +900,7 @@ def _log_z_walltime_figure(graph_id: str, n: int,
                         y = np.maximum(np.abs(lz - exact_lz) / denom, 1e-10)
                     else:
                         y = lz
-                    us_per_step = MCMC_US_PER_STEP.get(dyn, 2.0)
+                    us_per_step = rates.get(dyn, 2.0)
                     x_s = (steps * n_chains_for_target * us_per_step / 1e6)
                     group = f"beta={beta} init={init} dyn={dyn}"
                     fig.add_trace(
@@ -813,9 +922,9 @@ def _log_z_walltime_figure(graph_id: str, n: int,
                     )
 
             # FPRAS markers on the wall-time x-axis.
-            beta_budget = h_budget.get(beta, {})
-            for step_n_mult in sorted(beta_budget.keys()):
-                recs = beta_budget[step_n_mult]
+            beta_js_sweep = h_js_sweep.get(beta, {})
+            for step_n_mult in sorted(beta_js_sweep.keys()):
+                recs = beta_js_sweep[step_n_mult]
                 xs, ys, hovers = [], [], []
                 for r in recs:
                     lz = r["log_Z"]
@@ -825,7 +934,7 @@ def _log_z_walltime_figure(graph_id: str, n: int,
                         yv = max(abs(lz - exact_lz) / denom, 1e-10)
                     else:
                         yv = lz
-                    x_s = r["total_steps"] * JS_US_PER_STEP / 1e6
+                    x_s = r["total_steps"] * rates["js"] / 1e6
                     xs.append(x_s)
                     ys.append(yv)
                     hovers.append(
@@ -856,6 +965,45 @@ def _log_z_walltime_figure(graph_id: str, n: int,
                     ),
                     row=row, col=col,
                 )
+
+            # LSS Taylor markers: each m is one independent computation; x is
+            # its *measured* runtime_s (no µs/step estimation), y the same
+            # relative error as the FPRAS markers.
+            recs_by_method = h_taylor.get(beta, {})
+            for method, recs in recs_by_method.items():
+                xs, ys, hovers = [], [], []
+                for r in recs:
+                    lz = r["log_Z"]
+                    if math.isnan(lz):
+                        continue
+                    if has_exact:
+                        yv = max(abs(lz - exact_lz) / denom, 1e-10)
+                    else:
+                        yv = lz
+                    xs.append(max(r["runtime_s"], 1e-4))
+                    ys.append(yv)
+                    hovers.append(
+                        f"<b>Taylor β={beta}, h={h}</b><br>"
+                        f"m = {r['m']}<br>"
+                        f"method = {method}<br>"
+                        f"runtime = {r['runtime_s']:.3f} s (measured)<br>"
+                        f"log Ẑ = {lz:.4f}"
+                    )
+                if not xs:
+                    continue
+                group = f"beta={beta} src=lss"
+                fig.add_trace(
+                    go.Scatter(
+                        x=xs, y=ys, mode="lines+markers",
+                        name=f"Taylor β={beta}",
+                        legendgroup=group, showlegend=is_first,
+                        line=dict(color=color, width=0.9, dash="dot"),
+                        marker=dict(color=color, size=10, symbol="star",
+                                    line=dict(color="white", width=1.2)),
+                        hovertext=hovers, hoverinfo="text",
+                    ),
+                    row=row, col=col,
+                )
         fig.update_xaxes(type="log",
                          title_text="estimated wall time (s)",
                          row=row, col=col)
@@ -867,10 +1015,11 @@ def _log_z_walltime_figure(graph_id: str, n: int,
             fig.update_yaxes(title_text="log Ẑ", row=row, col=col)
     fig.update_layout(
         title=dict(text=(
-            "log Z vs estimated wall time -- MCMC thermo lines "
-            f"({MCMC_US_PER_STEP['metropolis']:.2f} µs/step Metropolis, "
-            f"{MCMC_US_PER_STEP['glauber']:.2f} µs/step Glauber); "
-            f"JS FPRAS markers ({JS_US_PER_STEP:.2f} µs/step)"),
+            f"log Z vs estimated wall time (n={n} rates) -- MCMC thermo lines "
+            f"({rates['metropolis']:.2f} µs/step Metropolis, "
+            f"{rates['glauber']:.2f} µs/step Glauber); "
+            f"JS FPRAS markers ({rates['js']:.2f} µs/step); "
+            "Taylor markers use measured runtime"),
             x=0.5, xanchor="center", font=dict(size=11)),
         height=320 * nrows + 120,
         hovermode="closest",
@@ -883,8 +1032,102 @@ def _log_z_walltime_figure(graph_id: str, n: int,
     return fig, has_exact
 
 
+def _log_z_taylor_figure(graph_id: str, n: int,
+                      log_z_taylor_for_graph: Dict[float, Dict[float, Dict[str, List[Dict]]]],
+                      betas: List[float], h_values: List[float]
+                      ) -> Tuple[go.Figure, bool]:
+    """LSS / Barvinok Taylor truncation: one curve per (β, method); x = m.
+    For n <= EXACT_MAX_N (true brute-force exact) y = relative error
+    |log Ẑ − log Z| / |log Z| (log-y); for larger n there is no reliable
+    exact reference, so y is the raw log Ẑ vs m.
+
+    For h = 0 the LSS chain runs at h_eff = 1/n (JS field-anneal); at
+    n <= EXACT_MAX_N we compare to exact log Z at the *requested* h, so the
+    relative error at h=0 includes the field-anneal bias as well as the
+    truncation error.  Both 'naive' and 'insects' backends are plotted;
+    toggle which one is visible via the method radio."""
+    has_exact = n <= EXACT_MAX_N
+    ncols = 3
+    nrows = math.ceil(len(h_values) / ncols)
+    titles = [f"h = {h}" for h in h_values] + [""] * (nrows * ncols - len(h_values))
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=titles,
+                        shared_xaxes=True,
+                        horizontal_spacing=0.07, vertical_spacing=0.14)
+    for h_idx, h in enumerate(h_values):
+        row, col = h_idx // ncols + 1, h_idx % ncols + 1
+        is_first = (h_idx == 0)
+        h_data = log_z_taylor_for_graph.get(h, {})
+        for b_idx, beta in enumerate(betas):
+            recs_by_method = h_data.get(beta, {})
+            if not recs_by_method:
+                continue
+            color = PLOTLY_COLORS[b_idx % len(PLOTLY_COLORS)]
+            # Each graph carries exactly one method (naive for n<=20,
+            # insects for n>20); iterate whatever's present.
+            for method, recs in recs_by_method.items():
+                xs, ys, hovers = [], [], []
+                for r in recs:
+                    lz = r["log_Z"]
+                    if math.isnan(lz):
+                        continue
+                    if has_exact:
+                        rel = r["rel_err"]
+                        if math.isnan(rel) or rel <= 0:
+                            continue
+                        y = max(rel, 1e-15)
+                    else:
+                        y = lz
+                    xs.append(r["m"])
+                    ys.append(y)
+                    hovers.append(
+                        f"<b>β={beta}, h={h}</b><br>"
+                        f"m = {r['m']}<br>"
+                        f"log Ẑ = {lz:.4f}<br>"
+                        f"log Z exact (h={h}) = {r['log_Z_exact']:.4f}<br>"
+                        f"|rel err| = {r['rel_err']:.2e}<br>"
+                        f"truncation bound (Lemma 2.1) ≤ {r['bound']:.2e}<br>"
+                        f"method = {method}, runtime = {r['runtime_s']:.2f} s"
+                    )
+                if not xs:
+                    continue
+                group = f"beta={beta}"
+                fig.add_trace(
+                    go.Scatter(
+                        x=xs, y=ys, mode="lines+markers", name=f"β={beta}",
+                        legendgroup=group, showlegend=is_first,
+                        line=dict(color=color, width=1.6),
+                        marker=dict(color=color, size=7,
+                                    line=dict(color="white", width=1)),
+                        hovertext=hovers, hoverinfo="text",
+                    ),
+                    row=row, col=col,
+                )
+        fig.update_xaxes(title_text="truncation order m", row=row, col=col)
+        if has_exact:
+            fig.update_yaxes(type="log",
+                             title_text="|log Ẑ − log Z| / |log Z|",
+                             row=row, col=col)
+        else:
+            fig.update_yaxes(title_text="log Ẑ", row=row, col=col)
+    fig.update_layout(
+        title=dict(text=(f"Taylor: relative error vs truncation order m "
+                         f"({graph_id}, n={n}); h=0 uses h_eff = 1/n "
+                         "(JS field-anneal)" if has_exact else
+                         f"Taylor: log Ẑ vs truncation order m ({graph_id}, "
+                         f"n={n}); no exact reference for n > 20"),
+                   x=0.5, xanchor="center", font=dict(size=11)),
+        height=320 * nrows + 120,
+        hovermode="closest", dragmode="pan",
+        legend=dict(title="β", itemsizing="constant",
+                    bgcolor="rgba(255,255,255,0.92)",
+                    groupclick="togglegroup"),
+        template="plotly_white",
+    )
+    return fig, has_exact
+
+
 def _segments_table_html(graph_id: str,
-                         log_z_budget_for_graph: Dict[float, Dict[float, Dict[int, List[Dict]]]],
+                         log_z_js_sweep_for_graph: Dict[float, Dict[float, Dict[int, List[Dict]]]],
                          betas: List[float], h_values: List[float]) -> str:
     """Render a small HTML table of n_segments at the paper's 1/n step
     (step_n_mult=1) for every (h, β) on this graph."""
@@ -895,7 +1138,7 @@ def _segments_table_html(graph_id: str,
     for h in h_values:
         cells = [f'<th>{h}</th>']
         for beta in betas:
-            recs = (log_z_budget_for_graph.get(h, {})
+            recs = (log_z_js_sweep_for_graph.get(h, {})
                     .get(beta, {}).get(1) or [])
             cells.append(f'<td>{recs[0]["n_segs"]}</td>' if recs else '<td>-</td>')
         body_rows.append('<tr>' + ''.join(cells) + '</tr>')
@@ -986,29 +1229,108 @@ and −1<sup>n</sup>) and <i>uniform</i> (each spin independently +1 or −1).
 </details>
 <details>
 <summary>What are the log Z views?</summary>
-<p>Two separate views, each with 5 h panels.</p>
+<p>Three separate views, each with 5 h panels.</p>
 <ul>
 <li><b>log Z (MCMC thermo)</b> — same spin chains as the energy view,
 post-processed by trapezoidal integration of ⟨E⟩ over β
 (<code>log Z(β,h) = n·log 2 − ∫₀^β ⟨E⟩(β',h) dβ'</code>).  One line per
 (β, init, dyn); x = per-chain steps.</li>
-<li><b>log Z (JS FPRAS budget)</b> — each marker is one independent full
+<li><b>log Z (Jerrum-Sinclair)</b> — each marker is one independent full
 FPRAS run at fixed <code>samples_per_segment ∈ {100,300,1000,3000,10000}</code>;
 lines connect runs at the same β.  Dash style encodes the schedule step
 (<code>1/n</code> solid, <code>1/(4n)</code> dashed, <code>1/(20n)</code> dotted).
 x = total FPRAS chain steps = <code>n_segments × (burnin + samples_per_segment)</code>.
 Schedule-length table below the chart.</li>
+<li><b>log Z (Taylor)</b> — deterministic truncation of
+<code>log Z(λ)</code> as a polynomial in the edge activity, using the
+Barvinok / Patel-Regts approach.  x = truncation order m; one curve per
+β.  For h=0 we run at <code>h_eff = 1/n</code> to keep the activity off
+the Lee-Yang circle; the relative error then includes both the Taylor
+truncation error and the field-anneal bias.</li>
 </ul>
 <p>For n=16 the y axis is relative error vs exact log Z (log-log); for n=40 raw log Ẑ.</p>
 </details>
 <details>
 <summary>What is the "log Z vs wall time" view?</summary>
-<p>Both estimators replotted with x = estimated wall time (seconds), so you
-can fairly compare which one reaches a target accuracy faster.  Step rates
-were microbenched on this machine:
-Metropolis ≈ 1.67 µs/step, Glauber ≈ 1.90 µs/step, JS subgraphs ≈ 1.01 µs/step.
-Each MCMC curve has x = (chains_used_for_target_β) · per_chain_steps · µs/step,
-each FPRAS marker has x = total_FPRAS_chain_steps · 1.01 µs.</p>
+<p>All three estimators replotted with x = wall time (seconds), so you
+can fairly compare which one reaches a target accuracy faster.  MCMC and
+JS FPRAS step rates were microbenched on this machine (one number per size,
+roughly flat in n on 3-regular graphs):
+Metropolis ≈ 1.4–1.5 µs/step, Glauber ≈ 1.3–1.4 µs/step,
+JS subgraphs ≈ 0.55 µs/step;
+Taylor markers use the measured per-run wall time directly.</p>
+</details>
+<details>
+<summary>How does the Jerrum-Sinclair FPRAS work? (telescoping)</summary>
+<p>JS 1990 maps the Ising partition function to a sum over <i>even
+subgraphs</i> X ⊆ E (each vertex has even degree in X):
+<code>Z(β, h) = const · Σ<sub>X</sub> λ<sup>|X|</sup> · μ<sup>|odd(X)|</sup></code>
+with edge activity <code>λ = tanh β</code> and field activity
+<code>μ = tanh(β·h)</code>. The "subgraphs-world" Markov chain proposes a
+random edge flip and accepts with Metropolis probability — fast to mix
+because the state space is structured.</p>
+<p>The hard part is going from a samplable distribution to the
+normalising constant Z.  JS does it by <b>telescoping in μ</b>:</p>
+<ul>
+<li>At <code>μ = 0</code> only fully-even subgraphs survive, and
+<code>Z(λ, 0)</code> has a closed form (no field, no need for MCMC).</li>
+<li>Pick a schedule <code>0 = μ<sub>0</sub> &lt; μ<sub>1</sub> &lt; ··· &lt;
+μ<sub>K</sub> = tanh(β·h)</code> with steps small enough that each
+ratio is bounded — the paper uses K = n equal-1/n increments.</li>
+<li>Telescope: <code>log Z(μ<sub>K</sub>) = log Z(0) + Σ<sub>k</sub>
+log [Z(μ<sub>k+1</sub>) / Z(μ<sub>k</sub>)]</code>.</li>
+<li>Each ratio is an expectation under
+<code>π<sub>k</sub> ∝ λ<sup>|X|</sup> μ<sub>k</sub><sup>|odd(X)|</sup></code>:
+<code>Z(μ<sub>k+1</sub>)/Z(μ<sub>k</sub>) = E<sub>X∼π<sub>k</sub></sub>
+[(μ<sub>k+1</sub>/μ<sub>k</sub>)<sup>|odd(X)|</sup>]</code>.</li>
+<li>Estimate each expectation by running the chain at <code>μ<sub>k</sub></code>
+and averaging the integrand over <code>samples_per_segment</code> states.</li>
+</ul>
+<p>The <code>step_n_mult</code> knob refines the schedule from K=n to
+K=4n or K=20n; finer schedules → smaller per-link variance but more
+links to estimate.  The sweep view shows the variance/cost tradeoff
+directly.</p>
+</details>
+<details>
+<summary>How does the Barvinok/Taylor truncation work?</summary>
+<p>Write the Ising partition function as a polynomial in the edge
+activity:
+<code>Z(λ) = Σ<sub>k</sub> c<sub>k</sub> λ<sup>k</sup></code>,
+where <code>c<sub>k</sub></code> counts size-k subsets of vertices
+weighted by <code>β<sup>|cut(S)|</sup></code> (or, dually, depends only
+on connected induced subgraphs of size ≤ k).  Then
+<code>log Z(λ) = Σ<sub>k</sub> f<sup>(k)</sup>(0) · λ<sup>k</sup> / k!</code>
+is an analytic function whose derivatives at 0 are recovered from
+<code>c<sub>1</sub>, ..., c<sub>k</sub></code> by Newton's identities.</p>
+<p>The <b>Barvinok / Patel-Regts FPTAS</b> truncates this Taylor series
+at order m:
+<code>log Ẑ<sub>m</sub>(λ) = Σ<sub>k≤m</sub> f<sup>(k)</sup>(0) λ<sup>k</sup>/k!</code>,
+evaluated at the activity <code>λ = exp(2β·h<sub>eff</sub>)</code>.
+By the <i>Lee-Yang theorem</i> all zeros of <code>Z(λ)</code> for
+ferromagnetic Ising lie on the unit circle <code>|λ| = 1</code>, so
+inside that disk <code>log Z</code> is analytic.  Writing
+<code>a = min(|λ|, 1/|λ|) &lt; 1</code> (the <code>λ ↔ 1/λ</code>
+symmetry handles <code>|λ| &gt; 1</code>), the order-m truncation error
+is bounded (Lemma 2.1) by
+<code>n·a<sup>m+1</sup> / ((m+1)(1 − a))</code> and decays like
+<code>a<sup>m</sup></code> — <i>polynomial time</i> for any fixed
+accuracy whenever <code>a</code> is bounded below 1, even though Ising
+itself is #P-hard.</p>
+<p>Two ways to extract the coefficients:</p>
+<ul>
+<li><b>naive</b> — enumerate every size-k subset, sum its weight.  Cost
+<code>C(n, k) · |E|</code> per <code>c<sub>k</sub></code>; fine for
+n ≲ 20.</li>
+<li><b>insects</b> (Patel-Regts §3.4) — a DP over connected induced
+subgraphs of size ≤ m.  For bounded-degree graphs the number of such
+subgraphs is poly(n) for fixed m, so the whole truncation is poly(n).</li>
+</ul>
+<p>For <code>h = 0</code> the activity <code>λ = exp(2βh) = 1</code>
+sits exactly on the Lee-Yang circle, so <code>a = 1</code> and the bound
+diverges.  We use the Jerrum-Sinclair field-anneal trick — replace h with
+<code>h<sub>eff</sub> = 1/n</code> — to push λ off the circle
+(<code>a = exp(−2β/n) &lt; 1</code>); the extra bias goes to 0 as
+n → ∞.</p>
 </details>
 </p>
 """
@@ -1019,7 +1341,8 @@ CONTROLS_HTML_TEMPLATE = """
     <legend>View</legend>
     <label><input type="radio" name="viewsel" checked value="energy"> energy convergence</label>
     <label><input type="radio" name="viewsel" value="logz_mcmc"> log Z (MCMC thermo)</label>
-    <label><input type="radio" name="viewsel" value="logz_fpras"> log Z (JS FPRAS budget)</label>
+    <label><input type="radio" name="viewsel" value="logz_js_sweep"> log Z (Jerrum-Sinclair)</label>
+    <label><input type="radio" name="viewsel" value="logz_taylor"> log Z (Taylor)</label>
     <label><input type="radio" name="viewsel" value="logz_walltime"> log Z vs wall time</label>
   </fieldset>
   <fieldset id="ctl-graph">
@@ -1075,8 +1398,24 @@ CONTROLS_SCRIPT = """
   }
   // Init/dyn filters apply in any view that contains MCMC traces.
   const VIEWS_WITH_INIT_DYN = new Set(['energy', 'logz_mcmc', 'logz_walltime']);
-  const PLOT_PREFIXES = ['convfig-', 'logzmcmcfig-', 'logzfig-', 'logzwalltimefig-'];
+  const PLOT_PREFIXES = ['convfig-', 'logzmcmcfig-', 'logzfig-', 'logzwalltimefig-', 'logztaylorfig-'];
 
+  function ensureRendered(div) {
+    if (!div || div.data) return;  // already rendered
+    const script = document.querySelector('script[data-figdiv="' + div.id + '"]');
+    if (!script) return;
+    const spec = JSON.parse(script.textContent);
+    Plotly.newPlot(div, spec.data, spec.layout, spec.config || {responsive: true});
+    div.classList.add('plotly-rendered');
+  }
+  function renderVisibleNow() {
+    document.querySelectorAll('.graph-section:not(.hidden) .plotly-lazy').forEach(div => {
+      // Skip lazy divs inside a view that is currently hidden.
+      const viewWrap = div.closest('[data-view]');
+      if (viewWrap && viewWrap.classList.contains('view-hidden')) return;
+      ensureRendered(div);
+    });
+  }
   function applyTraceFilters() {
     const initSet = new Set(Array.from(document.querySelectorAll('[data-filter="init"]:checked')).map(e => e.dataset.value));
     const dynSet = new Set(Array.from(document.querySelectorAll('[data-filter="dyn"]:checked')).map(e => e.dataset.value));
@@ -1092,6 +1431,7 @@ CONTROLS_SCRIPT = """
         if (m.init !== undefined && !initSet.has(m.init)) return false;
         if (m.dyn !== undefined && !dynSet.has(m.dyn)) return false;
         if (m.beta !== undefined && !betaSet.has(m.beta)) return false;
+        if (m.method !== undefined && !methodSet.has(m.method)) return false;
         return true;
       });
       Plotly.restyle(div, {visible: visibility});
@@ -1108,11 +1448,13 @@ CONTROLS_SCRIPT = """
       else el.classList.add('view-hidden');
     });
     setTimeout(() => {
+      renderVisibleNow();
+      applyTraceFilters();
       PLOT_PREFIXES.forEach(prefix => {
         const div = document.querySelector('.graph-section:not(.hidden) [data-view]:not(.view-hidden) [id^="' + prefix + '"]');
         if (div && window.Plotly && div.layout) Plotly.Plots.resize(div);
       });
-    }, 50);
+    }, 30);
   }
   function applyGraphSelection() {
     const sel = document.querySelector('input[name="graphsel"]:checked');
@@ -1125,6 +1467,7 @@ CONTROLS_SCRIPT = """
       }
     });
     setTimeout(() => {
+      renderVisibleNow();
       ['graphfig-'].concat(PLOT_PREFIXES).forEach(prefix => {
         document.querySelectorAll('.graph-section:not(.hidden) [id^="' + prefix + '"]').forEach(div => {
           if (window.Plotly && div.layout) Plotly.Plots.resize(div);
@@ -1132,7 +1475,7 @@ CONTROLS_SCRIPT = """
       });
       applyTraceFilters();
       applyView();
-    }, 50);
+    }, 30);
   }
   document.querySelectorAll('.controls input[type=checkbox]').forEach(cb => {
     cb.addEventListener('change', applyTraceFilters);
@@ -1158,8 +1501,9 @@ CONTROLS_SCRIPT = """
 def _make_section(graph_id: str, n: int, G_nx: nx.Graph, graph_data: Dict,
                   exact: Dict[Tuple[str, float, float], float],
                   log_z_for_graph: Dict[float, Dict[float, Dict[str, float]]],
-                  log_z_budget_for_graph: Dict[float, Dict[float, Dict[int, List[Dict]]]],
+                  log_z_js_sweep_for_graph: Dict[float, Dict[float, Dict[int, List[Dict]]]],
                   log_z_mcmc_for_graph: Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]],
+                  log_z_taylor_for_graph: Dict[float, Dict[float, Dict[str, List[Dict]]]],
                   betas: List[float], h_values: List[float],
                   inits: List[str], dyns: List[str],
                   is_default_visible: bool) -> str:
@@ -1167,43 +1511,45 @@ def _make_section(graph_id: str, n: int, G_nx: nx.Graph, graph_data: Dict,
     conv_fig, _ = _convergence_figure(graph_id, graph_data, exact,
                                       betas, h_values, inits, dyns)
     log_z_mcmc_fig, _ = _log_z_mcmc_figure(
-        graph_id, log_z_mcmc_for_graph, log_z_for_graph,
+        graph_id, n, log_z_mcmc_for_graph, log_z_for_graph,
         betas, h_values, inits, dyns,
     )
     log_z_fig, _ = _log_z_figure(
-        graph_id, n, log_z_budget_for_graph, log_z_for_graph,
+        graph_id, n, log_z_js_sweep_for_graph, log_z_for_graph,
         betas, h_values,
     )
     log_z_walltime_fig, _ = _log_z_walltime_figure(
-        graph_id, n, log_z_mcmc_for_graph, log_z_budget_for_graph,
-        log_z_for_graph, betas, h_values, inits, dyns,
+        graph_id, n, log_z_mcmc_for_graph, log_z_js_sweep_for_graph,
+        log_z_for_graph, log_z_taylor_for_graph,
+        betas, h_values, inits, dyns,
     )
-    seg_table_html = _segments_table_html(graph_id, log_z_budget_for_graph,
+    log_z_taylor_fig, _ = _log_z_taylor_figure(
+        graph_id, n, log_z_taylor_for_graph, betas, h_values,
+    )
+    seg_table_html = _segments_table_html(graph_id, log_z_js_sweep_for_graph,
                                           betas, h_values)
-    graph_html = graph_fig.to_html(include_plotlyjs=False, full_html=False,
-                                   div_id=f"graphfig-{graph_id}")
-    conv_html = conv_fig.to_html(include_plotlyjs=False, full_html=False,
-                                 div_id=f"convfig-{graph_id}")
-    log_z_mcmc_html = log_z_mcmc_fig.to_html(include_plotlyjs=False, full_html=False,
-                                             div_id=f"logzmcmcfig-{graph_id}")
-    log_z_html = log_z_fig.to_html(include_plotlyjs=False, full_html=False,
-                                   div_id=f"logzfig-{graph_id}")
-    log_z_walltime_html = log_z_walltime_fig.to_html(include_plotlyjs=False, full_html=False,
-                                                     div_id=f"logzwalltimefig-{graph_id}")
+    graph_html = _fig_lazy_html(graph_fig, f"graphfig-{graph_id}")
+    conv_html = _fig_lazy_html(conv_fig, f"convfig-{graph_id}")
+    log_z_mcmc_html = _fig_lazy_html(log_z_mcmc_fig, f"logzmcmcfig-{graph_id}")
+    log_z_html = _fig_lazy_html(log_z_fig, f"logzfig-{graph_id}")
+    log_z_walltime_html = _fig_lazy_html(log_z_walltime_fig, f"logzwalltimefig-{graph_id}")
+    log_z_taylor_html = _fig_lazy_html(log_z_taylor_fig, f"logztaylorfig-{graph_id}")
     graph_wrap = f'<div class="graphfig">{graph_html}</div>'
     conv_wrap = f'<div class="convfig" data-view="energy">{conv_html}</div>'
     log_z_mcmc_wrap = (f'<div class="logzmcmcfig" data-view="logz_mcmc">'
                        f'{log_z_mcmc_html}</div>')
-    log_z_wrap = (f'<div class="logzfig" data-view="logz_fpras">'
+    log_z_wrap = (f'<div class="logzfig" data-view="logz_js_sweep">'
                   f'{log_z_html}{seg_table_html}</div>')
     log_z_walltime_wrap = (f'<div class="logzwalltimefig" data-view="logz_walltime">'
                            f'{log_z_walltime_html}</div>')
+    log_z_taylor_wrap = (f'<div class="logztaylorfig" data-view="logz_taylor">'
+                      f'{log_z_taylor_html}</div>')
     section_class = "graph-section" + ("" if is_default_visible else " hidden")
     return (
         f'<section class="{section_class}" data-graph="{graph_id}">'
         f'<h2>{graph_id}  (3-regular, n={n})</h2>'
         + graph_wrap + conv_wrap + log_z_mcmc_wrap
-        + log_z_wrap + log_z_walltime_wrap +
+        + log_z_wrap + log_z_taylor_wrap + log_z_walltime_wrap +
         '</section>'
     )
 
@@ -1212,8 +1558,9 @@ def render_combined_html(out_path: str,
                          data: Dict, graph_ids: List[str],
                          exact: Dict[Tuple[str, float, float], float],
                          log_z: Dict[str, Dict[float, Dict[float, Dict[str, float]]]],
-                         log_z_budget: Dict[str, Dict[float, Dict[float, Dict[int, List[Dict]]]]],
+                         log_z_js_sweep: Dict[str, Dict[float, Dict[float, Dict[int, List[Dict]]]]],
                          log_z_mcmc: Dict[str, Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]]],
+                         log_z_taylor: Dict[str, Dict[float, Dict[float, Dict[str, List[Dict]]]]],
                          betas: List[float], h_values: List[float],
                          inits: List[str], dyns: List[str]) -> None:
     # Default-selected graph is the first one (n16_graph0 by ordering).
@@ -1242,14 +1589,15 @@ def render_combined_html(out_path: str,
         n = G_nx.number_of_nodes()
         sections.append(_make_section(
             gid, n, G_nx, data[gid], exact,
-            log_z.get(gid, {}), log_z_budget.get(gid, {}),
-            log_z_mcmc.get(gid, {}),
+            log_z.get(gid, {}), log_z_js_sweep.get(gid, {}),
+            log_z_mcmc.get(gid, {}), log_z_taylor.get(gid, {}),
             betas, h_values, inits, dyns,
             is_default_visible=(gid == default_selected),
         ))
-    # Inject plotly.js as the very first script via a stub chart helper or just
-    # add a CDN <script>.  Using the CDN tag directly is the simplest.
-    plotly_cdn = '<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>'
+    # Use the local plotly.js bundle that ships next to this script (no
+    # internet at view time).  Fetched once into vendor/ on first run.
+    _ensure_plotly_js()
+    plotly_cdn = '<script src="vendor/plotly.min.js"></script>'
     html = (
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<title>Ising MCMC convergence</title>"
@@ -1272,13 +1620,23 @@ def main():
     data, graph_ids, betas, h_values, inits, dyns = load_traces(TRACES_CSV)
     exact = load_exact(EXACT_CSV)
     log_z = load_log_z(LOG_Z_CSV)
-    log_z_budget = load_log_z_budget(LOG_Z_BUDGET_CSV)
+    log_z_js_sweep = load_log_z_js_sweep(LOG_Z_JS_SWEEP_CSV)
     log_z_mcmc = load_log_z_mcmc(LOG_Z_MCMC_CSV)
+    log_z_taylor = load_log_z_taylor(LOG_Z_TAYLOR_CSV)
+
+    # Note: a long-Glauber/uniform reference exists for n > EXACT_MAX_N
+    # (run_reference.py -> reference_*.csv), but validation against exact at
+    # n=16 showed its thermo-integrated log Z drifts up to ~18% at high beta
+    # (coarse-grid integration error).  So we do NOT use it as a ground
+    # truth: for n > EXACT_MAX_N every view plots the raw quantity (energy,
+    # log Ẑ) rather than a relative error against an unreliable reference.
+
     print(f"loaded {len(graph_ids)} graphs: {graph_ids}")
     print(f"  betas={betas}\n  h={h_values}\n  inits={inits}\n  dyns={dyns}")
     print(f"  log_z graphs:        {sorted(log_z.keys())}")
-    print(f"  log_z budget graphs: {sorted(log_z_budget.keys())}")
+    print(f"  log_z js sweep:      {sorted(log_z_js_sweep.keys())}")
     print(f"  log_z mcmc graphs:   {sorted(log_z_mcmc.keys())}")
+    print(f"  log_z taylor:        {sorted(log_z_taylor.keys())}")
 
     # Per-graph PNG (archival).
     for graph_id in graph_ids:
@@ -1291,7 +1649,7 @@ def main():
 
     # One combined interactive page.
     render_combined_html(COMBINED_HTML, data, graph_ids, exact, log_z,
-                         log_z_budget, log_z_mcmc,
+                         log_z_js_sweep, log_z_mcmc, log_z_taylor,
                          betas, h_values, inits, dyns)
     print(f"  wrote {COMBINED_HTML}")
 
