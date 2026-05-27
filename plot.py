@@ -930,10 +930,10 @@ US_PER_STEP_BY_N = {
 # FEP per-step cost (single-site update + online log-sum-exp), microbenched
 # per size and dynamics by run_microbench_fep.py.
 FEP_US_PER_STEP_BY_N = {
-    16: {"metropolis": 1.686, "glauber": 1.929},
-    30: {"metropolis": 1.606, "glauber": 1.845},
-    40: {"metropolis": 1.67, "glauber": 1.913},
-    50: {"metropolis": 1.726, "glauber": 1.907},
+    16: {"metropolis": 1.733, "glauber": 2.01},
+    30: {"metropolis": 1.673, "glauber": 1.942},
+    40: {"metropolis": 1.721, "glauber": 1.975},
+    50: {"metropolis": 1.688, "glauber": 1.947},
 }
 
 
@@ -1407,8 +1407,8 @@ compare which one reaches a target accuracy faster.  Step rates were
 microbenched on this machine (one number per size, roughly flat in n on
 3-regular graphs):
 MCMC-thermo Metropolis ≈ 1.4–1.5 / Glauber ≈ 1.3–1.4 µs/step;
-MCMC-FEP (adds an online log-sum-exp per step) Metropolis ≈ 1.6–1.7 /
-Glauber ≈ 1.8–1.9 µs/step; JS subgraphs ≈ 0.55 µs/step;
+MCMC-FEP (adds an online log-sum-exp per step) Metropolis ≈ 1.67–1.73 /
+Glauber ≈ 1.94–2.0 µs/step; JS subgraphs ≈ 0.55 µs/step;
 Taylor markers use the measured per-run wall time directly.  FEP markers
 (diamonds) account for the full telescoping cost: its total chain steps are
 <code>(#segments) × (burn-in + samples)</code>, summed over the ladder

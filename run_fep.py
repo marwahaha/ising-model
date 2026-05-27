@@ -47,7 +47,8 @@ GRAPHS_TO_RUN = {"n16_graph0", "n16_graph1", "n16_graph2", "n16_graph3",
                  "n30_graph0", "n30_graph1", "n40_graph0", "n40_graph1",
                  "n50_graph0", "n50_graph1"}
 
-BURNIN = 30_000
+BURNIN = 3_000            # matches JS (run_log_z_js.py); n=16 sweep shows
+                          # FEP bias is flat from ~1k upward (cold start)
 COLLECT = 150_000          # post-burn-in samples per segment chain
 NUM_LOG_POINTS = 30        # log-spaced record grid over [1, COLLECT]
 
