@@ -43,6 +43,9 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+import run_fep  # for FEP_BURNIN (kept in sync with the producer)
+FEP_BURNIN = run_fep.BURNIN
+
 
 DATA_DIR = "data"
 GRAPHS_SUBDIR = os.path.join(DATA_DIR, "graphs")
@@ -51,6 +54,7 @@ EXACT_CSV = os.path.join(DATA_DIR, "exact.csv")
 LOG_Z_CSV = os.path.join(DATA_DIR, "log_z.csv")
 LOG_Z_JS_SWEEP_CSV = os.path.join(DATA_DIR, "log_z_js_sweep.csv")
 LOG_Z_MCMC_CSV = os.path.join(DATA_DIR, "log_z_mcmc.csv")
+LOG_Z_FEP_CSV = os.path.join(DATA_DIR, "log_z_fep.csv")
 LOG_Z_TAYLOR_CSV = os.path.join(DATA_DIR, "log_z_taylor.csv")
 REFERENCE_E_CSV = os.path.join(DATA_DIR, "reference_E.csv")
 REFERENCE_LOGZ_CSV = os.path.join(DATA_DIR, "reference_logz.csv")
@@ -99,6 +103,12 @@ STYLE_PLOTLY = {
     ("ground", "glauber"): "dot",
     ("uniform", "glauber"): "dashdot",
 }
+# Display labels for the two init distributions, by temperature:
+# "ground" = all-aligned (zero-T) start -> low-temp;
+# "uniform" = random spins (infinite-T / beta=0) start -> high-temp.
+# These rename only what the user sees; "ground"/"uniform" stay as the
+# internal data keys (CSV values, STYLE_* dict keys, filter values).
+INIT_LABEL = {"ground": "low-temp", "uniform": "high-temp"}
 PLOTLY_COLORS = [
     "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
     "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
@@ -219,6 +229,29 @@ def load_log_z_mcmc(path: str
             step = int(row["step"])
             lz = float(row["log_z_mcmc"])
             raw[(gid, h, beta, init, dyn)].append((step, lz))
+    for (gid, h, beta, init, dyn), pairs in raw.items():
+        pairs.sort()
+        steps = np.array([p[0] for p in pairs])
+        lz = np.array([p[1] for p in pairs])
+        (out.setdefault(gid, {}).setdefault(h, {})
+            .setdefault(beta, {})[(init, dyn)]) = (steps, lz)
+    return out
+
+
+def load_log_z_fep(path: str
+                   ) -> Dict[str, Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]]]:
+    """log_z_fep[graph_id][h][beta][(init, dyn)] = (steps_array, log_z_array).
+    Free-energy-perturbation telescoping estimate from run_fep.py, one series
+    per (graph, h, beta, init, dynamics)."""
+    out: Dict = {}
+    if not os.path.exists(path):
+        return out
+    raw = defaultdict(list)
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            key = (row["graph_id"], float(row["h"]), float(row["beta"]),
+                   row["init"], row["dynamics"])
+            raw[key].append((int(row["step"]), float(row["log_Z"])))
     for (gid, h, beta, init, dyn), pairs in raw.items():
         pairs.sort()
         steps = np.array([p[0] for p in pairs])
@@ -364,13 +397,13 @@ def static_plot(graph_id: str, n: int, graph_data: Dict,
                     for b, c in zip(betas, colors)]
     style_handles = [
         plt.Line2D([], [], color="black", linewidth=1.8, linestyle="-",
-                   label="ground / metropolis"),
+                   label="low-temp / metropolis"),
         plt.Line2D([], [], color="black", linewidth=1.8, linestyle=(0, (6, 2)),
-                   label="uniform / metropolis"),
+                   label="high-temp / metropolis"),
         plt.Line2D([], [], color="black", linewidth=1.8, linestyle=":",
-                   label="ground / glauber"),
+                   label="low-temp / glauber"),
         plt.Line2D([], [], color="black", linewidth=1.8, linestyle="-.",
-                   label="uniform / glauber"),
+                   label="high-temp / glauber"),
     ]
     leg1 = fig.legend(handles=beta_handles, loc="lower right",
                       bbox_to_anchor=(0.99, 0.04), fontsize=8, ncol=2,
@@ -456,14 +489,14 @@ def _convergence_figure(graph_id: str, graph_data: Dict,
                     fig.add_trace(
                         go.Scatter(
                             x=steps, y=y, mode="lines",
-                            name=f"β={beta}, {init}, {dyn}",
+                            name=f"β={beta}, {INIT_LABEL[init]}, {dyn}",
                             legendgroup=group,
                             showlegend=is_first,
                             line=dict(color=color, width=1.6,
                                       dash=STYLE_PLOTLY[(init, dyn)]),
                             hovertemplate=(
                                 f"<b>β={beta}</b><br>"
-                                f"init={init}<br>"
+                                f"init={INIT_LABEL[init]}<br>"
                                 f"dynamics={dyn}<br>"
                                 f"h={h}<br>"
                                 "steps=%{x:,}<br>"
@@ -558,13 +591,13 @@ def _combined_log_z_figure(graph_id: str, n: int,
                     fig.add_trace(
                         go.Scatter(
                             x=x, y=y, mode="lines",
-                            name=f"β={beta}, {init}, {dyn}",
+                            name=f"β={beta}, {INIT_LABEL[init]}, {dyn}",
                             legendgroup=group, showlegend=is_first,
                             line=dict(color=color, width=1.4,
                                       dash=STYLE_PLOTLY[(init, dyn)]),
                             hovertemplate=(
                                 f"<b>β={beta}, h={h}</b><br>"
-                                f"init={init}, dynamics={dyn}<br>"
+                                f"init={INIT_LABEL[init]}, dynamics={dyn}<br>"
                                 "total chain steps=%{x:,}<br>"
                                 "y=%{y:.4g}<extra></extra>"
                             ),
@@ -646,16 +679,15 @@ def _log_z_mcmc_figure(graph_id: str, n: int,
                        log_z_mcmc_for_graph: Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]],
                        log_z_final_for_graph: Dict[float, Dict[float, Dict[str, float]]],
                        betas: List[float], h_values: List[float],
-                       inits: List[str], dyns: List[str]
-                       ) -> Tuple[go.Figure, bool]:
+                       inits: List[str], dyns: List[str],
+                       show_rel: bool) -> Tuple[go.Figure, bool]:
     """log Z derived from the spin chains' <E>(beta, step) traces via
     trapezoidal thermodynamic integration over beta.  Same 4 (init, dyn) x
-    10 beta structure as the energy view.  y axis is relative error vs exact
-    log Z for n <= EXACT_MAX_N (true brute force); for larger n there is no
-    reliable exact reference (the long-Glauber pseudo-truth drifts up to
-    ~18% at high beta from coarse-grid thermo integration), so y is the raw
-    log Ẑ over steps."""
-    has_exact = n <= EXACT_MAX_N
+    10 beta structure as the energy view.  show_rel=False -> raw log Ẑ;
+    show_rel=True -> relative error vs the reference (exact log Z for
+    n<=EXACT_MAX_N, the FEP estimate for larger n)."""
+    has_exact = show_rel
+    ref_name = "exact log Z" if n <= EXACT_MAX_N else "FEP reference"
     ncols = 3
     nrows = math.ceil(len(h_values) / ncols)
     titles = [f"h = {h}" for h in h_values] + [""] * (nrows * ncols - len(h_values))
@@ -688,12 +720,12 @@ def _log_z_mcmc_figure(graph_id: str, n: int,
                     fig.add_trace(
                         go.Scatter(
                             x=steps, y=y, mode="lines",
-                            name=f"β={beta}, {init}, {dyn}",
+                            name=f"β={beta}, {INIT_LABEL[init]}, {dyn}",
                             legendgroup=group, showlegend=is_first,
                             line=dict(color=color, width=1.5,
                                       dash=STYLE_PLOTLY[(init, dyn)]),
                             hovertemplate=(
-                                f"<b>β={beta}</b><br>init={init}<br>"
+                                f"<b>β={beta}</b><br>init={INIT_LABEL[init]}<br>"
                                 f"dynamics={dyn}<br>h={h}<br>steps=%{{x:,}}<br>"
                                 "y=%{y:.4g}<extra></extra>"),
                         ),
@@ -708,11 +740,9 @@ def _log_z_mcmc_figure(graph_id: str, n: int,
         else:
             fig.update_yaxes(title_text="log Ẑ (thermo)", row=row, col=col)
     fig.update_layout(
-        title=dict(text=("log Z from MCMC ⟨E⟩(β) via thermodynamic integration "
-                         "— relative error vs exact log Z (n ≤ 20)" if has_exact
-                         else "log Z from MCMC ⟨E⟩(β) via thermodynamic "
-                         "integration — log Ẑ over steps (no exact reference "
-                         "for n > 20)"),
+        title=dict(text=("log Z from MCMC ⟨E⟩(β) via thermodynamic integration — "
+                         + (f"relative error vs {ref_name}" if has_exact
+                            else "raw log Ẑ over steps")),
                    x=0.5, xanchor="center", font=dict(size=12)),
         height=320 * nrows + 120,
         hovermode="closest",
@@ -725,18 +755,110 @@ def _log_z_mcmc_figure(graph_id: str, n: int,
     return fig, has_exact
 
 
+def _log_z_fep_figure(graph_id: str, n: int,
+                      fep_for_graph: Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]],
+                      log_z_final_for_graph: Dict[float, Dict[float, Dict[str, float]]],
+                      betas: List[float], h_values: List[float],
+                      inits: List[str], dyns: List[str],
+                      show_rel: bool) -> go.Figure:
+    """Free-energy-perturbation (Zwanzig) telescoping estimate of log Z vs
+    chain work:  log Z(b_{k+1}) = n*log2 + sum_j log < e^{-Db_j E} >_{b_j}.
+    Unlike trapezoidal integration of <E> it carries no grid-discretization
+    bias.  One line per (β, init, dyn) -- same toggles as the energy view.
+    show_rel=False -> raw log Ẑ; show_rel=True -> relative error vs the
+    reference (exact log Z for n<=EXACT_MAX_N, the FEP estimate itself for
+    larger n)."""
+    ref_name = "exact log Z" if n <= EXACT_MAX_N else "FEP reference"
+    ncols = 3
+    nrows = math.ceil(len(h_values) / ncols)
+    titles = [f"h = {h}" for h in h_values] + [""] * (nrows * ncols - len(h_values))
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=titles,
+                        shared_xaxes=True,
+                        horizontal_spacing=0.07, vertical_spacing=0.12)
+    for h_idx, h in enumerate(h_values):
+        row, col = h_idx // ncols + 1, h_idx % ncols + 1
+        is_first = (h_idx == 0)
+        h_data = fep_for_graph.get(h, {})
+        h_finals = log_z_final_for_graph.get(h, {})
+        for b_idx, beta in enumerate(betas):
+            beta_data = h_data.get(beta, {})
+            if not beta_data:
+                continue
+            color = PLOTLY_COLORS[b_idx % len(PLOTLY_COLORS)]
+            # Total chain work to reach this β: it telescopes through the
+            # (b_idx+1) ladder segments below it, each running FEP_BURNIN +
+            # (recorded sample count).  Reported like the JS total_steps so
+            # the two are directly comparable.
+            n_seg = b_idx + 1
+            ref_lz = h_finals.get(beta, {}).get("exact")
+            if show_rel:
+                if ref_lz is None:
+                    continue
+                denom = abs(ref_lz) if abs(ref_lz) > 1e-12 else 1.0
+            for init in inits:
+                for dyn in dyns:
+                    if (init, dyn) not in beta_data:
+                        continue
+                    steps, lz = beta_data[(init, dyn)]
+                    x = n_seg * (FEP_BURNIN + steps)
+                    if show_rel:
+                        y = np.maximum(np.abs(lz - ref_lz) / denom, 1e-10)
+                    else:
+                        y = lz
+                    fig.add_trace(
+                        go.Scatter(
+                            x=x, y=y, mode="lines",
+                            name=f"β={beta}, {INIT_LABEL[init]}, {dyn}",
+                            legendgroup=f"beta={beta} init={init} dyn={dyn}",
+                            showlegend=is_first,
+                            line=dict(color=color, width=1.5,
+                                      dash=STYLE_PLOTLY[(init, dyn)]),
+                            hovertemplate=(
+                                f"<b>β={beta}, h={h}</b><br>init={INIT_LABEL[init]}, "
+                                f"dyn={dyn}<br>total chain steps=%{{x:,}}<br>"
+                                + ("rel err=%{y:.4g}" if show_rel else "log Ẑ=%{y:.4f}")
+                                + "<extra></extra>"),
+                        ),
+                        row=row, col=col,
+                    )
+        fig.update_xaxes(type="log",
+                         title_text="total chain steps (burn-in + samples, all segments)",
+                         row=row, col=col)
+        if show_rel:
+            fig.update_yaxes(type="log",
+                             title_text="|log Ẑ − log Z| / |log Z|",
+                             row=row, col=col)
+        else:
+            fig.update_yaxes(title_text="log Ẑ", row=row, col=col)
+    fig.update_layout(
+        title=dict(text=("log Z via FEP telescoping — "
+                         + (f"relative error vs {ref_name}" if show_rel
+                            else "raw log Ẑ over chain work")),
+                   x=0.5, xanchor="center", font=dict(size=12)),
+        height=320 * nrows + 120,
+        hovermode="closest", dragmode="pan",
+        legend=dict(title="(β, init, dyn)", itemsizing="constant",
+                    bgcolor="rgba(255,255,255,0.92)",
+                    groupclick="togglegroup"),
+        template="plotly_white",
+    )
+    return fig
+
+
 def _log_z_figure(graph_id: str, n: int,
                   log_z_js_sweep_for_graph: Dict[float, Dict[float, Dict[int, List[Dict]]]],
                   log_z_final_for_graph: Dict[float, Dict[float, Dict[str, float]]],
-                  betas: List[float], h_values: List[float]) -> Tuple[go.Figure, bool]:
+                  betas: List[float], h_values: List[float],
+                  show_rel: bool) -> Tuple[go.Figure, bool]:
     """FPRAS convergence: each curve is one (β, step_n_mult), plotting final
     log Ẑ across several independent FPRAS calls at varying
-    `samples_per_segment`.  x = total chain steps; y = relative error vs
-    exact log Z for n <= EXACT_MAX_N (true brute force, log-log), raw log Ẑ
-    otherwise (log-x linear-y; no reliable exact reference for n > 20).
+    `samples_per_segment`.  x = total chain steps; show_rel=False -> raw
+    log Ẑ, show_rel=True -> relative error vs the reference (exact log Z for
+    n<=EXACT_MAX_N, the FEP estimate for larger n).
     Dash style encodes step_n_mult (solid = paper's 1/n; finer steps dashed/
     dotted); color encodes β."""
-    has_exact = n <= EXACT_MAX_N
+    has_exact = show_rel
+    ref_name = "exact log Z" if n <= EXACT_MAX_N else "FEP reference"
     ncols = 3
     nrows = math.ceil(len(h_values) / ncols)
     titles = [f"h = {h}" for h in h_values] + [""] * (nrows * ncols - len(h_values))
@@ -806,11 +928,10 @@ def _log_z_figure(graph_id: str, n: int,
         else:
             fig.update_yaxes(title_text="log Ẑ", row=row, col=col)
     fig.update_layout(
-        title=dict(text=("FPRAS convergence: relative error vs exact log Z, "
-                         "sweeping samples_per_segment ∈ {100, 300, 1000, 3000, 10000}"
-                         if has_exact else
-                         "FPRAS log Ẑ vs total chain work, sweeping "
-                         "samples_per_segment (no exact reference for n > 20)"),
+        title=dict(text=("FPRAS, sweeping samples_per_segment ∈ "
+                         "{100, 300, 1000, 3000, 10000} — "
+                         + (f"relative error vs {ref_name}" if has_exact
+                            else "raw log Ẑ vs total chain work")),
                    x=0.5, xanchor="center", font=dict(size=12)),
         height=320 * nrows + 120,
         hovermode="closest",
@@ -836,6 +957,15 @@ US_PER_STEP_BY_N = {
     40: {"metropolis": 1.46, "glauber": 1.381, "js": 0.547},
 }
 
+# FEP per-step cost (single-site update + online log-sum-exp), microbenched
+# per size and dynamics by run_microbench_fep.py.
+FEP_US_PER_STEP_BY_N = {
+    16: {"metropolis": 1.686, "glauber": 1.929},
+    30: {"metropolis": 1.606, "glauber": 1.845},
+    40: {"metropolis": 1.67, "glauber": 1.913},
+    50: {"metropolis": 1.726, "glauber": 1.907},
+}
+
 
 def _us_per_step(n: int) -> Dict[str, float]:
     """Step rates for the measured size nearest to n."""
@@ -843,30 +973,30 @@ def _us_per_step(n: int) -> Dict[str, float]:
     return US_PER_STEP_BY_N[nearest]
 
 
+def _fep_us_per_step(n: int) -> Dict[str, float]:
+    """FEP step rates for the measured size nearest to n."""
+    nearest = min(FEP_US_PER_STEP_BY_N, key=lambda k: abs(k - n))
+    return FEP_US_PER_STEP_BY_N[nearest]
+
+
 def _log_z_walltime_figure(graph_id: str, n: int,
                            log_z_mcmc_for_graph: Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]],
+                           log_z_fep_for_graph: Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]],
                            log_z_js_sweep_for_graph: Dict[float, Dict[float, Dict[int, List[Dict]]]],
                            log_z_final_for_graph: Dict[float, Dict[float, Dict[str, float]]],
                            log_z_taylor_for_graph: Dict[float, Dict[float, Dict[str, List[Dict]]]],
                            betas: List[float], h_values: List[float],
-                           inits: List[str], dyns: List[str]
-                           ) -> Tuple[go.Figure, bool]:
-    """log Z from both estimators on a fair wall-time x-axis.
-
-    For MCMC thermo at recorded step t for target beta_i with dynamics d:
-      wall seconds = (i+1) * t * MCMC_US_PER_STEP[d] / 1e6
-    -- (i+1) spin chains contribute to the integral up to beta_i, each at t
-    steps, at the measured per-step rate for that dynamics.
-
-    For FPRAS at (beta, m, step_n_mult):
-      wall seconds = total_steps * JS_US_PER_STEP / 1e6
-    -- total chain steps for that one full FPRAS run at the measured rate.
-
-    Both shown on the same axes per h panel.  y is relative error vs exact
-    log Z for n <= EXACT_MAX_N (true brute force); raw log Z otherwise (no
-    reliable exact reference for n > 20)."""
-    has_exact = n <= EXACT_MAX_N
+                           inits: List[str], dyns: List[str],
+                           show_rel: bool) -> Tuple[go.Figure, bool]:
+    """All estimators on a fair wall-time x-axis: MCMC thermo lines, MCMC FEP
+    lines (markers), FPRAS markers, Taylor markers.  MCMC/FEP/JS step counts
+    are converted to seconds via microbenched per-step rates; Taylor uses its
+    measured runtime.  show_rel=False -> raw log Ẑ; show_rel=True -> relative
+    error vs the reference (exact log Z for n<=EXACT_MAX_N, FEP otherwise)."""
+    has_exact = show_rel
+    ref_name = "exact log Z" if n <= EXACT_MAX_N else "FEP reference"
     rates = _us_per_step(n)
+    fep_rates = _fep_us_per_step(n)
     ncols = 3
     nrows = math.ceil(len(h_values) / ncols)
     titles = [f"h = {h}" for h in h_values] + [""] * (nrows * ncols - len(h_values))
@@ -906,14 +1036,51 @@ def _log_z_walltime_figure(graph_id: str, n: int,
                     fig.add_trace(
                         go.Scatter(
                             x=x_s, y=y, mode="lines",
-                            name=f"MCMC β={beta}, {init}, {dyn}",
+                            name=f"MCMC β={beta}, {INIT_LABEL[init]}, {dyn}",
                             legendgroup=group, showlegend=is_first,
                             line=dict(color=color, width=1.4,
                                       dash=STYLE_PLOTLY[(init, dyn)]),
                             hovertemplate=(
                                 f"<b>MCMC thermo β={beta}, h={h}</b><br>"
-                                f"init={init}, dynamics={dyn}<br>"
+                                f"init={INIT_LABEL[init]}, dynamics={dyn}<br>"
                                 f"n_chains used = {n_chains_for_target}<br>"
+                                "wall time = %{x:.3g}s<br>"
+                                "y = %{y:.4g}<extra></extra>"
+                            ),
+                        ),
+                        row=row, col=col,
+                    )
+
+            # MCMC FEP lines (markers to distinguish from the thermo lines).
+            # Total chain work telescopes through (b_idx+1) ladder segments,
+            # each FEP_BURNIN + (sample count); converted to seconds at the
+            # microbenched FEP per-step rate for the dynamics.
+            beta_fep = log_z_fep_for_graph.get(h, {}).get(beta, {})
+            for init in inits:
+                for dyn in dyns:
+                    if (init, dyn) not in beta_fep:
+                        continue
+                    steps, lz = beta_fep[(init, dyn)]
+                    if has_exact:
+                        y = np.maximum(np.abs(lz - exact_lz) / denom, 1e-10)
+                    else:
+                        y = lz
+                    total_steps = n_chains_for_target * (FEP_BURNIN + steps)
+                    x_s = total_steps * fep_rates.get(dyn, 1.8) / 1e6
+                    group = f"beta={beta} init={init} dyn={dyn}"
+                    fig.add_trace(
+                        go.Scatter(
+                            x=x_s, y=y, mode="lines+markers",
+                            name=f"FEP β={beta}, {INIT_LABEL[init]}, {dyn}",
+                            legendgroup=group, showlegend=is_first,
+                            line=dict(color=color, width=1.0,
+                                      dash=STYLE_PLOTLY[(init, dyn)]),
+                            marker=dict(color=color, size=5, symbol="diamond",
+                                        line=dict(color="white", width=0.5)),
+                            hovertemplate=(
+                                f"<b>FEP β={beta}, h={h}</b><br>"
+                                f"init={INIT_LABEL[init]}, dynamics={dyn}<br>"
+                                f"segments = {n_chains_for_target}<br>"
                                 "wall time = %{x:.3g}s<br>"
                                 "y = %{y:.4g}<extra></extra>"
                             ),
@@ -1015,11 +1182,12 @@ def _log_z_walltime_figure(graph_id: str, n: int,
             fig.update_yaxes(title_text="log Ẑ", row=row, col=col)
     fig.update_layout(
         title=dict(text=(
-            f"log Z vs estimated wall time (n={n} rates) -- MCMC thermo lines "
-            f"({rates['metropolis']:.2f} µs/step Metropolis, "
-            f"{rates['glauber']:.2f} µs/step Glauber); "
-            f"JS FPRAS markers ({rates['js']:.2f} µs/step); "
-            "Taylor markers use measured runtime"),
+            ("relative error vs " + ref_name if has_exact
+             else "raw log Ẑ")
+            + f" vs estimated wall time (n={n} rates) — MCMC thermo "
+            f"({rates['metropolis']:.2f}/{rates['glauber']:.2f} µs/step "
+            f"Metro/Glauber); JS FPRAS ({rates['js']:.2f} µs/step); "
+            "Taylor uses measured runtime"),
             x=0.5, xanchor="center", font=dict(size=11)),
         height=320 * nrows + 120,
         hovermode="closest",
@@ -1034,19 +1202,18 @@ def _log_z_walltime_figure(graph_id: str, n: int,
 
 def _log_z_taylor_figure(graph_id: str, n: int,
                       log_z_taylor_for_graph: Dict[float, Dict[float, Dict[str, List[Dict]]]],
-                      betas: List[float], h_values: List[float]
-                      ) -> Tuple[go.Figure, bool]:
+                      betas: List[float], h_values: List[float],
+                      show_rel: bool) -> Tuple[go.Figure, bool]:
     """LSS / Barvinok Taylor truncation: one curve per (β, method); x = m.
-    For n <= EXACT_MAX_N (true brute-force exact) y = relative error
-    |log Ẑ − log Z| / |log Z| (log-y); for larger n there is no reliable
-    exact reference, so y is the raw log Ẑ vs m.
+    show_rel=False -> raw log Ẑ vs m; show_rel=True -> relative error
+    |log Ẑ − log Z| / |log Z| (log-y) vs the reference (exact log Z for
+    n<=EXACT_MAX_N, the FEP estimate for larger n; r['rel_err'] is filled
+    against whichever applies in main()).
 
-    For h = 0 the LSS chain runs at h_eff = 1/n (JS field-anneal); at
-    n <= EXACT_MAX_N we compare to exact log Z at the *requested* h, so the
-    relative error at h=0 includes the field-anneal bias as well as the
-    truncation error.  Both 'naive' and 'insects' backends are plotted;
-    toggle which one is visible via the method radio."""
-    has_exact = n <= EXACT_MAX_N
+    For h = 0 the LSS chain runs at h_eff = 1/n (JS field-anneal), so the
+    relative error at h=0 also carries the field-anneal bias."""
+    has_exact = show_rel
+    ref_name = "exact log Z" if n <= EXACT_MAX_N else "FEP reference"
     ncols = 3
     nrows = math.ceil(len(h_values) / ncols)
     titles = [f"h = {h}" for h in h_values] + [""] * (nrows * ncols - len(h_values))
@@ -1110,11 +1277,10 @@ def _log_z_taylor_figure(graph_id: str, n: int,
         else:
             fig.update_yaxes(title_text="log Ẑ", row=row, col=col)
     fig.update_layout(
-        title=dict(text=(f"Taylor: relative error vs truncation order m "
-                         f"({graph_id}, n={n}); h=0 uses h_eff = 1/n "
-                         "(JS field-anneal)" if has_exact else
-                         f"Taylor: log Ẑ vs truncation order m ({graph_id}, "
-                         f"n={n}); no exact reference for n > 20"),
+        title=dict(text=(f"Taylor truncation vs order m ({graph_id}, n={n}) — "
+                         + (f"relative error vs {ref_name}" if has_exact
+                            else "raw log Ẑ")
+                         + "; h=0 uses h_eff = 1/n (JS field-anneal)"),
                    x=0.5, xanchor="center", font=dict(size=11)),
         height=320 * nrows + 120,
         hovermode="closest", dragmode="pan",
@@ -1223,18 +1389,29 @@ happens with probability strictly less than 1, so Glauber is "smoother".</li>
 mixing properties; mixing-time results in the literature are typically
 stated for Glauber.</p>
 <p>The two initial distributions are:
-<i>ground</i> (uniform over the two all-aligned ground states +1<sup>n</sup>
-and −1<sup>n</sup>) and <i>uniform</i> (each spin independently +1 or −1).
+<i>low-temp</i> (the all-aligned ground states +1<sup>n</sup> / −1<sup>n</sup>,
+i.e. a zero-temperature start) and <i>high-temp</i> (each spin independently
++1 or −1 — the β=0, infinite-temperature start).
 </p>
 </details>
 <details>
 <summary>What are the log Z views?</summary>
-<p>Three separate views, each with 5 h panels.</p>
+<p>Several views, each with 5 h panels.</p>
 <ul>
 <li><b>log Z (MCMC thermo)</b> — same spin chains as the energy view,
 post-processed by trapezoidal integration of ⟨E⟩ over β
 (<code>log Z(β,h) = n·log 2 − ∫₀^β ⟨E⟩(β',h) dβ'</code>).  One line per
 (β, init, dyn); x = per-chain steps.</li>
+<li><b>log Z (MCMC FEP)</b> — same idea, but estimated by free-energy
+perturbation (Zwanzig) telescoping along the β-ladder instead of
+integrating ⟨E⟩:
+<code>log Z(β<sub>k+1</sub>) = n·log 2 + Σ<sub>j≤k</sub> log ⟨ e<sup>−Δβ<sub>j</sub>·E</sup> ⟩<sub>β<sub>j</sub></sub></code>.
+Each ratio is exact in expectation, so there is <i>no</i> trapezoidal
+grid-discretization bias — validated against exact log Z at n=16, it has
+~2× lower mean error than trapezoidal on the same grid, with the biggest
+gains in the β≈0.5–1.8 transition region.  One line per (β, init, dyn) —
+same Metropolis/Glauber × low-temp/high-temp toggles as the energy view;
+x = post-burn-in samples per segment.</li>
 <li><b>log Z (Jerrum-Sinclair)</b> — each marker is one independent full
 FPRAS run at fixed <code>samples_per_segment ∈ {100,300,1000,3000,10000}</code>;
 lines connect runs at the same β.  Dash style encodes the schedule step
@@ -1248,41 +1425,56 @@ Barvinok / Patel-Regts approach.  x = truncation order m; one curve per
 the Lee-Yang circle; the relative error then includes both the Taylor
 truncation error and the field-anneal bias.</li>
 </ul>
-<p>For n=16 the y axis is relative error vs exact log Z (log-log); for n=40 raw log Ẑ.</p>
+<p>Each log-Z view shows <b>two stacked figure sets</b>: raw log Ẑ on top,
+then relative error below.  The relative-error reference is the brute-force
+exact log Z for n ≤ 20, and the FEP estimate itself for larger n (where no
+exact is tractable).</p>
 </details>
 <details>
 <summary>What is the "log Z vs wall time" view?</summary>
-<p>All three estimators replotted with x = wall time (seconds), so you
-can fairly compare which one reaches a target accuracy faster.  MCMC and
-JS FPRAS step rates were microbenched on this machine (one number per size,
-roughly flat in n on 3-regular graphs):
-Metropolis ≈ 1.4–1.5 µs/step, Glauber ≈ 1.3–1.4 µs/step,
-JS subgraphs ≈ 0.55 µs/step;
-Taylor markers use the measured per-run wall time directly.</p>
+<p>All estimators replotted with x = wall time (seconds), so you can fairly
+compare which one reaches a target accuracy faster.  Step rates were
+microbenched on this machine (one number per size, roughly flat in n on
+3-regular graphs):
+MCMC-thermo Metropolis ≈ 1.4–1.5 / Glauber ≈ 1.3–1.4 µs/step;
+MCMC-FEP (adds an online log-sum-exp per step) Metropolis ≈ 1.6–1.7 /
+Glauber ≈ 1.8–1.9 µs/step; JS subgraphs ≈ 0.55 µs/step;
+Taylor markers use the measured per-run wall time directly.  FEP markers
+(diamonds) account for the full telescoping cost: its total chain steps are
+<code>(#segments) × (burn-in + samples)</code>, summed over the ladder
+segments below the target β.</p>
 </details>
 <details>
 <summary>How does the Jerrum-Sinclair FPRAS work? (telescoping)</summary>
-<p>JS 1990 maps the Ising partition function to a sum over <i>even
-subgraphs</i> X ⊆ E (each vertex has even degree in X):
-<code>Z(β, h) = const · Σ<sub>X</sub> λ<sup>|X|</sup> · μ<sup>|odd(X)|</sup></code>
+<p>JS 1990 maps the Ising partition function to a sum over <i>edge subsets</i>
+X ⊆ E, weighted by the number of odd-degree vertices <code>|odd(X)|</code>:
+<code>Z(β, h) = const · Σ<sub>X⊆E</sub> λ<sup>|X|</sup> · μ<sup>|odd(X)|</sup></code>
 with edge activity <code>λ = tanh β</code> and field activity
 <code>μ = tanh(β·h)</code>. The "subgraphs-world" Markov chain proposes a
 random edge flip and accepts with Metropolis probability — fast to mix
 because the state space is structured.</p>
-<p>The hard part is going from a samplable distribution to the
-normalising constant Z.  JS does it by <b>telescoping in μ</b>:</p>
+<p>The hard part is the normalising constant Z.  JS gets it by
+<b>telescoping in μ</b>, annealing from the <i>easy</i> end
+<code>μ = 1</code> <b>down</b> to the target:</p>
 <ul>
-<li>At <code>μ = 0</code> only fully-even subgraphs survive, and
-<code>Z(λ, 0)</code> has a closed form (no field, no need for MCMC).</li>
-<li>Pick a schedule <code>0 = μ<sub>0</sub> &lt; μ<sub>1</sub> &lt; ··· &lt;
-μ<sub>K</sub> = tanh(β·h)</code> with steps small enough that each
-ratio is bounded — the paper uses K = n equal-1/n increments.</li>
-<li>Telescope: <code>log Z(μ<sub>K</sub>) = log Z(0) + Σ<sub>k</sub>
-log [Z(μ<sub>k+1</sub>) / Z(μ<sub>k</sub>)]</code>.</li>
+<li>At <code>μ = 1</code> every subset contributes equally in μ, so
+<code>Z'(1) = Σ<sub>X⊆E</sub> λ<sup>|X|</sup> = Π<sub>e</sub>(1 + λ<sub>e</sub>)</code>
+— a <b>closed form</b>, no MCMC.  (The opposite end <code>μ = 0</code> keeps
+only fully-even subgraphs and <i>is</i> the hard h = 0 partition function —
+so we anneal away from it, not toward a closed form at 0.)</li>
+<li>Pick a <b>decreasing</b> schedule
+<code>1 = μ<sub>0</sub> &gt; μ<sub>1</sub> &gt; ··· &gt; μ<sub>K</sub> = tanh(β·h)</code>,
+the paper's step being <code>μ<sub>k</sub> = (n−k)/n</code> (K ≈ n).</li>
+<li>Telescope: <code>log Z(μ<sub>K</sub>) = log Z(μ<sub>0</sub>=1) +
+Σ<sub>k</sub> log [Z(μ<sub>k+1</sub>) / Z(μ<sub>k</sub>)]</code>.</li>
 <li>Each ratio is an expectation under
 <code>π<sub>k</sub> ∝ λ<sup>|X|</sup> μ<sub>k</sub><sup>|odd(X)|</sup></code>:
 <code>Z(μ<sub>k+1</sub>)/Z(μ<sub>k</sub>) = E<sub>X∼π<sub>k</sub></sub>
-[(μ<sub>k+1</sub>/μ<sub>k</sub>)<sup>|odd(X)|</sup>]</code>.</li>
+[(μ<sub>k+1</sub>/μ<sub>k</sub>)<sup>|odd(X)|</sup>]</code>.  The denominator
+<code>μ<sub>k</sub></code> is never 0 (it starts at 1); only the final
+target can be 0 (when h = 0), where the ratio becomes
+<code>E[0<sup>|odd(X)|</sup>]</code> = the fraction of <i>even</i> subgraphs
+sampled at <code>μ<sub>K−1</sub></code>.</li>
 <li>Estimate each expectation by running the chain at <code>μ<sub>k</sub></code>
 and averaging the integrand over <code>samples_per_segment</code> states.</li>
 </ul>
@@ -1341,6 +1533,7 @@ CONTROLS_HTML_TEMPLATE = """
     <legend>View</legend>
     <label><input type="radio" name="viewsel" checked value="energy"> energy convergence</label>
     <label><input type="radio" name="viewsel" value="logz_mcmc"> log Z (MCMC thermo)</label>
+    <label><input type="radio" name="viewsel" value="logz_fep"> log Z (MCMC FEP)</label>
     <label><input type="radio" name="viewsel" value="logz_js_sweep"> log Z (Jerrum-Sinclair)</label>
     <label><input type="radio" name="viewsel" value="logz_taylor"> log Z (Taylor)</label>
     <label><input type="radio" name="viewsel" value="logz_walltime"> log Z vs wall time</label>
@@ -1351,8 +1544,8 @@ CONTROLS_HTML_TEMPLATE = """
   </fieldset>
   <fieldset id="ctl-init" class="view-only-energy">
     <legend>Initial distribution</legend>
-    <label><input type="checkbox" data-filter="init" data-value="ground"> ground</label>
-    <label><input type="checkbox" checked data-filter="init" data-value="uniform"> uniform</label>
+    <label><input type="checkbox" data-filter="init" data-value="ground"> low-temp</label>
+    <label><input type="checkbox" checked data-filter="init" data-value="uniform"> high-temp</label>
     <div class="shortcut-btns">
       <button type="button" onclick="setAll('init', true)">all</button>
       <button type="button" onclick="setAll('init', false)">none</button>
@@ -1397,8 +1590,8 @@ CONTROLS_SCRIPT = """
     return v ? v.value : 'energy';
   }
   // Init/dyn filters apply in any view that contains MCMC traces.
-  const VIEWS_WITH_INIT_DYN = new Set(['energy', 'logz_mcmc', 'logz_walltime']);
-  const PLOT_PREFIXES = ['convfig-', 'logzmcmcfig-', 'logzfig-', 'logzwalltimefig-', 'logztaylorfig-'];
+  const VIEWS_WITH_INIT_DYN = new Set(['energy', 'logz_mcmc', 'logz_fep', 'logz_walltime']);
+  const PLOT_PREFIXES = ['convfig-', 'logzmcmcfig-', 'logzfepfig-', 'logzfig-', 'logzwalltimefig-', 'logztaylorfig-'];
 
   function ensureRendered(div) {
     if (!div || div.data) return;  // already rendered
@@ -1422,19 +1615,22 @@ CONTROLS_SCRIPT = """
     const betaSet = new Set(Array.from(document.querySelectorAll('[data-filter="beta"]:checked')).map(e => e.dataset.value));
     const sel = document.querySelector('input[name="graphsel"]:checked');
     if (!sel) return;
+    // Each view may hold more than one figure with the same prefix (e.g. the
+    // stacked raw-log-Z and relative-error sets), so filter all of them.
     PLOT_PREFIXES.forEach(prefix => {
-      const div = document.getElementById(prefix + sel.value);
-      if (!div || !div.data) return;
-      const visibility = div.data.map(trace => {
-        const m = parseGroup(trace.legendgroup);
-        if (!m) return true;
-        if (m.init !== undefined && !initSet.has(m.init)) return false;
-        if (m.dyn !== undefined && !dynSet.has(m.dyn)) return false;
-        if (m.beta !== undefined && !betaSet.has(m.beta)) return false;
-        if (m.method !== undefined && !methodSet.has(m.method)) return false;
-        return true;
+      document.querySelectorAll('.graph-section:not(.hidden) [id^="' + prefix + '"]').forEach(div => {
+        if (!div.data) return;
+        const visibility = div.data.map(trace => {
+          const m = parseGroup(trace.legendgroup);
+          if (!m) return true;
+          if (m.init !== undefined && !initSet.has(m.init)) return false;
+          if (m.dyn !== undefined && !dynSet.has(m.dyn)) return false;
+          if (m.beta !== undefined && !betaSet.has(m.beta)) return false;
+          if (m.method !== undefined && !methodSet.has(m.method)) return false;
+          return true;
+        });
+        Plotly.restyle(div, {visible: visibility});
       });
-      Plotly.restyle(div, {visible: visibility});
     });
   }
   function applyView() {
@@ -1451,8 +1647,9 @@ CONTROLS_SCRIPT = """
       renderVisibleNow();
       applyTraceFilters();
       PLOT_PREFIXES.forEach(prefix => {
-        const div = document.querySelector('.graph-section:not(.hidden) [data-view]:not(.view-hidden) [id^="' + prefix + '"]');
-        if (div && window.Plotly && div.layout) Plotly.Plots.resize(div);
+        document.querySelectorAll('.graph-section:not(.hidden) [data-view]:not(.view-hidden) [id^="' + prefix + '"]').forEach(div => {
+          if (window.Plotly && div.layout) Plotly.Plots.resize(div);
+        });
       });
     }, 30);
   }
@@ -1503,6 +1700,7 @@ def _make_section(graph_id: str, n: int, G_nx: nx.Graph, graph_data: Dict,
                   log_z_for_graph: Dict[float, Dict[float, Dict[str, float]]],
                   log_z_js_sweep_for_graph: Dict[float, Dict[float, Dict[int, List[Dict]]]],
                   log_z_mcmc_for_graph: Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]],
+                  log_z_fep_for_graph: Dict[float, Dict[float, Tuple[np.ndarray, np.ndarray]]],
                   log_z_taylor_for_graph: Dict[float, Dict[float, Dict[str, List[Dict]]]],
                   betas: List[float], h_values: List[float],
                   inits: List[str], dyns: List[str],
@@ -1510,46 +1708,58 @@ def _make_section(graph_id: str, n: int, G_nx: nx.Graph, graph_data: Dict,
     graph_fig = _graph_figure(G_nx, title=f"{graph_id} — spring layout")
     conv_fig, _ = _convergence_figure(graph_id, graph_data, exact,
                                       betas, h_values, inits, dyns)
-    log_z_mcmc_fig, _ = _log_z_mcmc_figure(
-        graph_id, n, log_z_mcmc_for_graph, log_z_for_graph,
-        betas, h_values, inits, dyns,
-    )
-    log_z_fig, _ = _log_z_figure(
-        graph_id, n, log_z_js_sweep_for_graph, log_z_for_graph,
-        betas, h_values,
-    )
-    log_z_walltime_fig, _ = _log_z_walltime_figure(
-        graph_id, n, log_z_mcmc_for_graph, log_z_js_sweep_for_graph,
-        log_z_for_graph, log_z_taylor_for_graph,
-        betas, h_values, inits, dyns,
-    )
-    log_z_taylor_fig, _ = _log_z_taylor_figure(
-        graph_id, n, log_z_taylor_for_graph, betas, h_values,
-    )
     seg_table_html = _segments_table_html(graph_id, log_z_js_sweep_for_graph,
                                           betas, h_values)
+
+    # Each log-Z view shows two stacked figure sets: raw log Ẑ on top, then
+    # relative error below (vs exact for n<=EXACT_MAX_N, vs the FEP estimate
+    # otherwise).  abs/rel ids share the view's prefix so the lazy-render and
+    # trace-filter JS (which key on the prefix) pick up both.
+    def _two_set(view: str, prefix: str, make, extra: str = "") -> str:
+        abs_html = _fig_lazy_html(make(False), f"{prefix}-abs-{graph_id}")
+        rel_html = _fig_lazy_html(make(True), f"{prefix}-rel-{graph_id}")
+        return (f'<div class="{prefix}" data-view="{view}">'
+                f'{abs_html}{rel_html}{extra}</div>')
+
     graph_html = _fig_lazy_html(graph_fig, f"graphfig-{graph_id}")
     conv_html = _fig_lazy_html(conv_fig, f"convfig-{graph_id}")
-    log_z_mcmc_html = _fig_lazy_html(log_z_mcmc_fig, f"logzmcmcfig-{graph_id}")
-    log_z_html = _fig_lazy_html(log_z_fig, f"logzfig-{graph_id}")
-    log_z_walltime_html = _fig_lazy_html(log_z_walltime_fig, f"logzwalltimefig-{graph_id}")
-    log_z_taylor_html = _fig_lazy_html(log_z_taylor_fig, f"logztaylorfig-{graph_id}")
     graph_wrap = f'<div class="graphfig">{graph_html}</div>'
     conv_wrap = f'<div class="convfig" data-view="energy">{conv_html}</div>'
-    log_z_mcmc_wrap = (f'<div class="logzmcmcfig" data-view="logz_mcmc">'
-                       f'{log_z_mcmc_html}</div>')
-    log_z_wrap = (f'<div class="logzfig" data-view="logz_js_sweep">'
-                  f'{log_z_html}{seg_table_html}</div>')
-    log_z_walltime_wrap = (f'<div class="logzwalltimefig" data-view="logz_walltime">'
-                           f'{log_z_walltime_html}</div>')
-    log_z_taylor_wrap = (f'<div class="logztaylorfig" data-view="logz_taylor">'
-                      f'{log_z_taylor_html}</div>')
+
+    mcmc_wrap = _two_set(
+        "logz_mcmc", "logzmcmcfig",
+        lambda sr: _log_z_mcmc_figure(
+            graph_id, n, log_z_mcmc_for_graph, log_z_for_graph,
+            betas, h_values, inits, dyns, show_rel=sr)[0])
+    fep_wrap = _two_set(
+        "logz_fep", "logzfepfig",
+        lambda sr: _log_z_fep_figure(
+            graph_id, n, log_z_fep_for_graph, log_z_for_graph,
+            betas, h_values, inits, dyns, show_rel=sr))
+    js_wrap = _two_set(
+        "logz_js_sweep", "logzfig",
+        lambda sr: _log_z_figure(
+            graph_id, n, log_z_js_sweep_for_graph, log_z_for_graph,
+            betas, h_values, show_rel=sr)[0],
+        extra=seg_table_html)
+    taylor_wrap = _two_set(
+        "logz_taylor", "logztaylorfig",
+        lambda sr: _log_z_taylor_figure(
+            graph_id, n, log_z_taylor_for_graph, betas, h_values,
+            show_rel=sr)[0])
+    walltime_wrap = _two_set(
+        "logz_walltime", "logzwalltimefig",
+        lambda sr: _log_z_walltime_figure(
+            graph_id, n, log_z_mcmc_for_graph, log_z_fep_for_graph,
+            log_z_js_sweep_for_graph, log_z_for_graph, log_z_taylor_for_graph,
+            betas, h_values, inits, dyns, show_rel=sr)[0])
+
     section_class = "graph-section" + ("" if is_default_visible else " hidden")
     return (
         f'<section class="{section_class}" data-graph="{graph_id}">'
         f'<h2>{graph_id}  (3-regular, n={n})</h2>'
-        + graph_wrap + conv_wrap + log_z_mcmc_wrap
-        + log_z_wrap + log_z_taylor_wrap + log_z_walltime_wrap +
+        + graph_wrap + conv_wrap + mcmc_wrap + fep_wrap
+        + js_wrap + taylor_wrap + walltime_wrap +
         '</section>'
     )
 
@@ -1560,6 +1770,7 @@ def render_combined_html(out_path: str,
                          log_z: Dict[str, Dict[float, Dict[float, Dict[str, float]]]],
                          log_z_js_sweep: Dict[str, Dict[float, Dict[float, Dict[int, List[Dict]]]]],
                          log_z_mcmc: Dict[str, Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]]],
+                         log_z_fep: Dict[str, Dict[float, Dict[float, Tuple[np.ndarray, np.ndarray]]]],
                          log_z_taylor: Dict[str, Dict[float, Dict[float, Dict[str, List[Dict]]]]],
                          betas: List[float], h_values: List[float],
                          inits: List[str], dyns: List[str]) -> None:
@@ -1590,7 +1801,8 @@ def render_combined_html(out_path: str,
         sections.append(_make_section(
             gid, n, G_nx, data[gid], exact,
             log_z.get(gid, {}), log_z_js_sweep.get(gid, {}),
-            log_z_mcmc.get(gid, {}), log_z_taylor.get(gid, {}),
+            log_z_mcmc.get(gid, {}), log_z_fep.get(gid, {}),
+            log_z_taylor.get(gid, {}),
             betas, h_values, inits, dyns,
             is_default_visible=(gid == default_selected),
         ))
@@ -1622,20 +1834,43 @@ def main():
     log_z = load_log_z(LOG_Z_CSV)
     log_z_js_sweep = load_log_z_js_sweep(LOG_Z_JS_SWEEP_CSV)
     log_z_mcmc = load_log_z_mcmc(LOG_Z_MCMC_CSV)
+    log_z_fep = load_log_z_fep(LOG_Z_FEP_CSV)
     log_z_taylor = load_log_z_taylor(LOG_Z_TAYLOR_CSV)
 
-    # Note: a long-Glauber/uniform reference exists for n > EXACT_MAX_N
-    # (run_reference.py -> reference_*.csv), but validation against exact at
-    # n=16 showed its thermo-integrated log Z drifts up to ~18% at high beta
-    # (coarse-grid integration error).  So we do NOT use it as a ground
-    # truth: for n > EXACT_MAX_N every view plots the raw quantity (energy,
-    # log Ẑ) rather than a relative error against an unreliable reference.
+    # Reference for log-Z relative error: brute-force exact where we have it
+    # (n <= EXACT_MAX_N), else the FEP telescoping estimate (no trapezoidal
+    # grid bias; validated vs exact at n=16).  The earlier long-Glauber
+    # thermo-integrated reference is NOT used -- it drifted ~18% at high beta.
+    FEP_REF_KEY = ("uniform", "glauber")     # high-temp Glauber FEP
+    for gid, h_map in log_z_fep.items():
+        for h, beta_map in h_map.items():
+            for beta, series in beta_map.items():
+                sl = series.get(FEP_REF_KEY) or next(iter(series.values()))
+                fep_final = float(sl[1][-1])
+                (log_z.setdefault(gid, {}).setdefault(h, {})
+                    .setdefault(beta, {}).setdefault("exact", fep_final))
+    # Fill Taylor relative error against the (now-present) reference where the
+    # producer left it NaN (no brute-force exact at n > EXACT_MAX_N).
+    for gid, h_map in log_z_taylor.items():
+        for h, beta_map in h_map.items():
+            for beta, method_map in beta_map.items():
+                ref = log_z.get(gid, {}).get(h, {}).get(beta, {}).get("exact")
+                if ref is None:
+                    continue
+                denom = abs(ref) if abs(ref) > 1e-12 else 1.0
+                for recs in method_map.values():
+                    for r in recs:
+                        if not math.isnan(r["rel_err"]):
+                            continue
+                        r["log_Z_exact"] = ref
+                        r["rel_err"] = abs(r["log_Z"] - ref) / denom
 
     print(f"loaded {len(graph_ids)} graphs: {graph_ids}")
     print(f"  betas={betas}\n  h={h_values}\n  inits={inits}\n  dyns={dyns}")
     print(f"  log_z graphs:        {sorted(log_z.keys())}")
     print(f"  log_z js sweep:      {sorted(log_z_js_sweep.keys())}")
     print(f"  log_z mcmc graphs:   {sorted(log_z_mcmc.keys())}")
+    print(f"  log_z fep graphs:    {sorted(log_z_fep.keys())}")
     print(f"  log_z taylor:        {sorted(log_z_taylor.keys())}")
 
     # Per-graph PNG (archival).
@@ -1649,7 +1884,7 @@ def main():
 
     # One combined interactive page.
     render_combined_html(COMBINED_HTML, data, graph_ids, exact, log_z,
-                         log_z_js_sweep, log_z_mcmc, log_z_taylor,
+                         log_z_js_sweep, log_z_mcmc, log_z_fep, log_z_taylor,
                          betas, h_values, inits, dyns)
     print(f"  wrote {COMBINED_HTML}")
 
