@@ -56,10 +56,8 @@ LOG_Z_JS_SWEEP_CSV = os.path.join(DATA_DIR, "log_z_js_sweep.csv")
 LOG_Z_MCMC_CSV = os.path.join(DATA_DIR, "log_z_mcmc.csv")
 LOG_Z_FEP_CSV = os.path.join(DATA_DIR, "log_z_fep.csv")
 LOG_Z_TAYLOR_CSV = os.path.join(DATA_DIR, "log_z_taylor.csv")
-REFERENCE_E_CSV = os.path.join(DATA_DIR, "reference_E.csv")
-REFERENCE_LOGZ_CSV = os.path.join(DATA_DIR, "reference_logz.csv")
-# n above which brute-force exact is intractable; for these graphs the
-# "reference" comes from a 5x-longer Glauber/uniform run (run_reference.py).
+# n above which brute-force exact is intractable; for these graphs the log-Z
+# relative-error reference is the FEP estimate (see main()).
 EXACT_MAX_N = 20
 VENDOR_DIR = "vendor"
 PLOTLY_LOCAL_JS = os.path.join(VENDOR_DIR, "plotly.min.js")
@@ -180,34 +178,6 @@ def load_log_z(path: str) -> Dict[str, Dict[float, Dict[float, Dict[str, float]]
             method = row["method"]
             lz = float(row["log_Z"])
             out.setdefault(gid, {}).setdefault(h, {}).setdefault(beta, {})[method] = lz
-    return out
-
-
-def load_reference_E(path: str) -> Dict[Tuple[str, float, float], float]:
-    """reference <E>(graph, h, beta) from the long Glauber/uniform run, in
-    the same shape as load_exact so it can back-fill the exact dict for
-    graphs too big to brute-force."""
-    out: Dict[Tuple[str, float, float], float] = {}
-    if not os.path.exists(path):
-        return out
-    with open(path, newline="") as f:
-        for row in csv.DictReader(f):
-            out[(row["graph_id"], float(row["h"]), float(row["beta"]))] = \
-                float(row["ref_E"])
-    return out
-
-
-def load_reference_logz(path: str) -> Dict[str, Dict[float, Dict[float, float]]]:
-    """reference log Z(graph, h, beta) thermo-integrated from the long
-    Glauber/uniform <E>.  ref[gid][h][beta] = log_Z."""
-    out: Dict = {}
-    if not os.path.exists(path):
-        return out
-    with open(path, newline="") as f:
-        for row in csv.DictReader(f):
-            out.setdefault(row["graph_id"], {}) \
-               .setdefault(float(row["h"]), {})[float(row["beta"])] = \
-                float(row["ref_log_Z"])
     return out
 
 
