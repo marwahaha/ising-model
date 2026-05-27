@@ -1,2 +1,12 @@
 __pycache__/
 *.pyc
+
+# Local Claude session/agent state
+.claude/
+
+# Stray run logs and one-off backups
+data/*.log
+data/backup_before_rerun/
+
+# Vendored plotly bundle (fetched on first plot.py run)
+vendor/
