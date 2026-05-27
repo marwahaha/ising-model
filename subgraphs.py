@@ -2,8 +2,8 @@
 
 Implements the chain MC_Ising and the FPRAS of
   Jerrum & Sinclair, "Polynomial-time approximation algorithms for the Ising
-  model" (extended abstract), ICALP 1990, Springer LNCS 443, pp. 462-475
-  (the file at /Users/macbookpro/Desktop/BFb0032051.pdf).
+  model" (extended abstract), ICALP 1990, Springer LNCS 443, pp. 462-475.
+  doi:10.1007/BFb0032051
 
 Notation follows the paper.
 

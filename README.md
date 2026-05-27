@@ -21,6 +21,15 @@ ways and compare them in one interactive HTML:
 For n > 20 there is no tractable brute force, so the FEP estimate is used as
 the relative-error reference.
 
+## Setup
+
+```bash
+pip install -r requirements.txt   # numpy, networkx, plotly, matplotlib (Python 3)
+```
+
+Plotly's JavaScript bundle is fetched from the CDN into `vendor/` on the first
+`plot.py` run; everything else runs offline.
+
 ## Pipeline
 
 ```bash
@@ -56,12 +65,13 @@ per-step rates from `run_microbench.py` (MCMC/JS) and `run_microbench_fep.py`
 
 - β = `[0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 1.3, 1.8, 2.5, 5.0]`
 - h = `[0.0, 0.1, 0.2, 0.5, 1.0]`
-- Graphs: 3-regular, n ∈ {16, 30, 40, 50}; configured per producer
+- Graphs: 3-regular, n ∈ {16, 30, 40, 50, 60}; configured per producer
   (`GRAPHS_TO_RUN` / `SIZES_SEEDS_COUNTS`).
 
 ## HTML views
 
-Pick a graph and toggle β / init / dynamics. Each **log Z** view shows two
+The prebuilt `convergence.html` opens directly in a browser (or regenerate it
+with `python3 plot.py`). Pick a graph and toggle β / init / dynamics. Each **log Z** view shows two
 stacked sets — raw `log Ẑ` on top, relative error below (reference: exact for
 n ≤ 20, FEP otherwise):
 
@@ -78,3 +88,9 @@ n ≤ 20, FEP otherwise):
 Init labels: **low-temp** = ground (all-aligned) start, **high-temp** =
 uniform (random) start. The MCMC step accounting includes burn-in; FEP and JS
 both use 3,000 burn-in steps per segment.
+
+## Tests
+
+```bash
+python3 test_subgraphs.py   # 6 checks of the JS chain + FPRAS (also runs under pytest)
+```

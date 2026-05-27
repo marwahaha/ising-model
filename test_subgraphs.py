@@ -2,7 +2,7 @@
 
 The implementation in subgraphs.py follows the paper
   Jerrum & Sinclair, "Polynomial-time approximation algorithms for the Ising
-  model" (extended abstract), ICALP 1990 (PDF: BFb0032051.pdf).
+  model" (extended abstract), ICALP 1990. doi:10.1007/BFb0032051
 
 Tests, in order:
 
