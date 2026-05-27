@@ -16,8 +16,8 @@ import time
 import run_fep
 
 GRAPHS_SUBDIR = os.path.join("data", "graphs")
-SIZE_GRAPHS = {16: "n16_graph0", 30: "n30_graph0",
-               40: "n40_graph0", 50: "n50_graph0"}
+SIZE_GRAPHS = {16: "n16_graph0", 30: "n30_graph0", 40: "n40_graph0",
+               50: "n50_graph0", 60: "n60_graph0"}
 BETA, H, DBETA = 0.5, 0.2, 0.1
 BURNIN, COLLECT = 3_000, 150_000       # match the producer's proportions
 REPEATS = 3

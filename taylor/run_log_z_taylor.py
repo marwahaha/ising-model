@@ -35,7 +35,8 @@ BETAS = [0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 1.3, 1.8, 2.5, 5.0]
 H_VALUES = [0.0, 0.1, 0.2, 0.5, 1.0]
 GRAPHS_TO_RUN = {"n16_graph0", "n16_graph1", "n16_graph2", "n16_graph3",
                  "n30_graph0", "n30_graph1", "n40_graph0", "n40_graph1",
-                 "n50_graph0", "n50_graph1"}
+                 "n50_graph0", "n50_graph1",
+                 "n60_graph0", "n60_graph1"}
 M_VALUES_SMALL = [2, 4, 6, 8, 10]   # naive on n <= 20
 M_VALUES_LARGE = [2, 4, 6]          # insects on n > 20 (m=8 already minutes)
 # Naive is cheap on small graphs (C(n,m)*|E| with small n) but blows up at

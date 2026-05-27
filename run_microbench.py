@@ -23,7 +23,8 @@ from subgraphs import SubgraphsChain
 
 GRAPHS_SUBDIR = os.path.join("data", "graphs")
 # One representative graph per size.
-SIZE_GRAPHS = {16: "n16_graph0", 30: "n30_graph0", 40: "n40_graph0"}
+SIZE_GRAPHS = {16: "n16_graph0", 30: "n30_graph0", 40: "n40_graph0",
+               50: "n50_graph0", 60: "n60_graph0"}
 BETA = 0.5
 WARMUP = 20_000
 MEASURE = 400_000

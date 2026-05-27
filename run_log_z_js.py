@@ -36,7 +36,8 @@ BETAS = [0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 1.3, 1.8, 2.5, 5.0]
 H_VALUES = [0.0, 0.1, 0.2, 0.5, 1.0]
 GRAPHS_TO_RUN = {"n16_graph0", "n16_graph1", "n16_graph2", "n16_graph3",
                  "n30_graph0", "n30_graph1", "n40_graph0", "n40_graph1",
-                 "n50_graph0", "n50_graph1"}
+                 "n50_graph0", "n50_graph1",
+                 "n60_graph0", "n60_graph1"}
 
 # FPRAS hyperparameters.  Each schedule segment is a (burnin, sample) pair
 # of inner-chain steps; total chain work per call is
@@ -127,21 +128,31 @@ def main():
                     seed = abs(hash((graph_id, beta, h, "js"))) % (1 << 32)
                     rng = random.Random(seed)
                     t0 = time.time()
-                    lz_js, trace = js_trace(
-                        edges, n, beta, h,
-                        burnin=JS_BURNIN, samples_per_step=JS_SAMPLES,
-                        num_log_samples=NUM_LOG_SAMPLES,
-                        rng=rng,
-                    )
+                    try:
+                        lz_js, trace = js_trace(
+                            edges, n, beta, h,
+                            burnin=JS_BURNIN, samples_per_step=JS_SAMPLES,
+                            num_log_samples=NUM_LOG_SAMPLES,
+                            rng=rng,
+                        )
+                        lz_str = f"{lz_js:.6f}"
+                    except RuntimeError as exc:
+                        # Hard h=0 / large-n corner: the final mu->0 ratio
+                        # (even-subgraph fraction) can underflow to 0 in finite
+                        # samples.  Record nan rather than crash (the sweep
+                        # does the same).
+                        lz_js, trace, lz_str = float("nan"), [], "nan"
+                        print(f"   ! h={h:.1f} beta={beta:.1f}: {exc}")
                     dt = time.time() - t0
                     w_final.writerow([graph_id, n, h, beta, "js_fpras",
-                                      f"{lz_js:.6f}", f"{dt:.4f}"])
+                                      lz_str, f"{dt:.4f}"])
                     for step, lz_run in trace:
                         w_trace.writerow([graph_id, n, h, beta,
                                           step, f"{lz_run:.6f}"])
-                    print(f"  h={h:.1f}  beta={beta:>4.1f}   "
-                          f"{exact_str}   js={lz_js:>9.4f}   "
-                          f"trace_pts={len(trace):3d}   t={dt:5.2f}s")
+                    if trace or lz_str != "nan":
+                        print(f"  h={h:.1f}  beta={beta:>4.1f}   "
+                              f"{exact_str}   js={lz_js:>9.4f}   "
+                              f"trace_pts={len(trace):3d}   t={dt:5.2f}s")
                 fout.flush()
                 ftrace.flush()
     finally:

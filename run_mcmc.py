@@ -48,7 +48,8 @@ N_STEPS = 400_000
 NUM_LOG_SAMPLES = 120
 # (n, base_seed_for_graphs, num_graphs).  Mix of n=16, n=30, n=40.
 # n=40 reuses the seed=200 graphs already on disk.
-SIZES_SEEDS_COUNTS = [(16, 100, 4), (30, 300, 2), (40, 200, 2), (50, 250, 2)]
+SIZES_SEEDS_COUNTS = [(16, 100, 4), (30, 300, 2), (40, 200, 2),
+                      (50, 250, 2), (60, 350, 2)]
 
 DATA_DIR = "data"
 GRAPHS_SUBDIR = os.path.join(DATA_DIR, "graphs")

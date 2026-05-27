@@ -922,18 +922,21 @@ def _log_z_figure(graph_id: str, n: int,
 # nearest measured size for the graph being plotted.
 #   { n : {"metropolis": µs, "glauber": µs, "js": µs} }
 US_PER_STEP_BY_N = {
-    16: {"metropolis": 1.547, "glauber": 1.421, "js": 0.553},
-    30: {"metropolis": 1.407, "glauber": 1.344, "js": 0.547},
-    40: {"metropolis": 1.46, "glauber": 1.381, "js": 0.547},
+    16: {"metropolis": 1.565, "glauber": 1.468, "js": 0.572},
+    30: {"metropolis": 1.494, "glauber": 1.41, "js": 0.59},
+    40: {"metropolis": 1.565, "glauber": 1.476, "js": 0.574},
+    50: {"metropolis": 1.526, "glauber": 1.455, "js": 0.604},
+    60: {"metropolis": 1.471, "glauber": 1.47, "js": 0.584},
 }
 
 # FEP per-step cost (single-site update + online log-sum-exp), microbenched
 # per size and dynamics by run_microbench_fep.py.
 FEP_US_PER_STEP_BY_N = {
-    16: {"metropolis": 1.733, "glauber": 2.01},
-    30: {"metropolis": 1.673, "glauber": 1.942},
-    40: {"metropolis": 1.721, "glauber": 1.975},
-    50: {"metropolis": 1.688, "glauber": 1.947},
+    16: {"metropolis": 1.143, "glauber": 1.387},
+    30: {"metropolis": 1.128, "glauber": 1.327},
+    40: {"metropolis": 1.147, "glauber": 1.344},
+    50: {"metropolis": 1.163, "glauber": 1.348},
+    60: {"metropolis": 1.106, "glauber": 1.306},
 }
 
 
@@ -1406,9 +1409,9 @@ exact is tractable).</p>
 compare which one reaches a target accuracy faster.  Step rates were
 microbenched on this machine (one number per size, roughly flat in n on
 3-regular graphs):
-MCMC-thermo Metropolis ≈ 1.4–1.5 / Glauber ≈ 1.3–1.4 µs/step;
-MCMC-FEP (adds an online log-sum-exp per step) Metropolis ≈ 1.67–1.73 /
-Glauber ≈ 1.94–2.0 µs/step; JS subgraphs ≈ 0.55 µs/step;
+MCMC-thermo (dict-based chain) Metropolis ≈ 1.5–1.6 / Glauber ≈ 1.4–1.5
+µs/step; MCMC-FEP (leaner list-based chain + online log-sum-exp) Metropolis
+≈ 1.1 / Glauber ≈ 1.3 µs/step; JS subgraphs ≈ 0.57–0.60 µs/step;
 Taylor markers use the measured per-run wall time directly.  FEP markers
 (diamonds) account for the full telescoping cost: its total chain steps are
 <code>(#segments) × (burn-in + samples)</code>, summed over the ladder
