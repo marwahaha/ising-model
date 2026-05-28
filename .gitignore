@@ -8,5 +8,3 @@ __pycache__/
 data/*.log
 data/backup_before_rerun/
 
-# Vendored plotly bundle (fetched on first plot.py run)
-vendor/
