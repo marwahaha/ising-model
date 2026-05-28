@@ -1404,8 +1404,21 @@ truncation error and the field-anneal bias.</li>
 </ul>
 <p>Each log-Z view shows <b>two stacked figure sets</b>: raw log Ẑ on top,
 then relative error below.  The relative-error reference is the brute-force
-exact log Z for n ≤ 20, and the FEP estimate itself for larger n (where no
-exact is tractable).</p>
+exact log Z for n ≤ 20, and a dedicated dense-ladder FEP baseline
+(<code>data/log_z_fep_baseline.csv</code>) for larger n where no exact is
+tractable.  The baseline is Forward FEP on a uniform Δβ=0.1 grid (50
+segments from 0 to 5) with 2M post-burn-in samples per segment under
+Glauber + ground init — about <b>100M MC steps per (graph, h)</b>, ~25× the
+work behind a single energy-trace chain in this app.  At n=16 the baseline
+matches exact log Z to a mean relative error of ~2.7×10⁻⁴ (max ~1.7×10⁻³)
+across 200 anchors.</p>
+<p><b>Note on the <i>ground</i> init</b>: previously this picked uniformly
+from {+1<sup>n</sup>, −1<sup>n</sup>}, both labelled "ground states" — but
+at h ≠ 0 only the configuration aligned with sign(h) is a true ground state,
+and the chain seeded on the other side often stayed stuck at high β.  The
+rule now aligns with sign(h) (random tie-break at h=0), so the ground+h>0
+chains shown here differ from earlier versions of this page; the baseline
+above was generated under the fixed rule.</p>
 </details>
 <details>
 <summary>What is the "log Z vs wall time" view?</summary>

@@ -15,39 +15,29 @@ import os
 from collections import defaultdict
 
 
-PARTIALS_DIR = "data/baseline_partials"      # h > 0 (fixed ground init)
-PARTIALS_DIR_V1 = "data/baseline_partials_v1"  # h = 0 (init bug irrelevant)
+PARTIALS_DIR = "data/baseline_partials"
 OUT_CSV = "data/log_z_fep_baseline.csv"
 EXACT_CSV = "data/log_z.csv"
 ANCHORS = [0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 1.3, 1.8, 2.5, 5.0]
 
 
 def merge() -> int:
-    """Take h=0 from v1 (broken init code was harmless at h=0), h>0 from
-    the v2 rerun with fixed ground-state alignment."""
     rows = 0
     header_written = False
     with open(OUT_CSV, "w", newline="") as fout:
         w = csv.writer(fout)
-        for src_dir, h_filter in [
-            (PARTIALS_DIR_V1, lambda h: h == 0.0),
-            (PARTIALS_DIR, lambda h: h != 0.0),
-        ]:
-            if not os.path.isdir(src_dir):
-                continue
-            for path in sorted(glob.glob(os.path.join(src_dir, "*.csv"))):
-                with open(path, newline="") as fin:
-                    r = csv.reader(fin)
-                    header = next(r, None)
-                    if header is None:
-                        continue
-                    if not header_written:
-                        w.writerow(header)
-                        header_written = True
-                    for row in r:
-                        if h_filter(float(row[2])):
-                            w.writerow(row)
-                            rows += 1
+        for path in sorted(glob.glob(os.path.join(PARTIALS_DIR, "*.csv"))):
+            with open(path, newline="") as fin:
+                r = csv.reader(fin)
+                header = next(r, None)
+                if header is None:
+                    continue
+                if not header_written:
+                    w.writerow(header)
+                    header_written = True
+                for row in r:
+                    w.writerow(row)
+                    rows += 1
     return rows
 
 
