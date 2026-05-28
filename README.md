@@ -11,6 +11,14 @@ ways and compare them in one interactive HTML:
   is exact in expectation, so unlike the trapezoidal estimate it carries no
   β-grid discretization bias (validated vs exact at n=16: ~2× lower error,
   biggest gains in the β≈0.5–1.8 transition).
+- **MCMC FEP baseline** (`run_fep_dense.py`) — a higher-accuracy FEP run used
+  as the `n > 20` reference for relative-error plots. Same telescoping recipe
+  but on a dense β-ladder (Δβ=0.1, 50 segments from 0 to 5.0) with much
+  longer chains per segment (2M post-burn-in samples), ground init aligned
+  with sign(h), Glauber dynamics. Output: `data/log_z_fep_baseline.csv`.
+  Validated at n=16 vs exact log Z: mean relative error **~2.7e-4** (max
+  ~1.7e-3) across 200 anchors, ~5× more accurate than the coarse FEP it
+  replaces as the reference.
 - **Jerrum-Sinclair** — the 1990 subgraphs-world FPRAS, telescoping the field
   activity μ = tanh(βh) from the closed-form μ=1 end (`Z'(1) = Π_e(1+λ_e)`)
   *down* to the target.
@@ -18,8 +26,9 @@ ways and compare them in one interactive HTML:
   as a power series in the edge activity (Lee-Yang ⇒ zeros on |λ|=1, so the
   series converges for |λ| < 1).
 
-For n > 20 there is no tractable brute force, so the FEP estimate is used as
-the relative-error reference.
+For n > 20 there is no tractable brute force, so the dense-ladder FEP
+baseline (`data/log_z_fep_baseline.csv`, see "MCMC FEP baseline" below) is
+used as the relative-error reference.
 
 ## Setup
 
@@ -36,6 +45,8 @@ Plotly's JavaScript bundle is fetched from the CDN into `vendor/` on the first
 python3 run_mcmc.py                  # spin chains   -> traces.csv + exact.csv (+ graphs)
 python3 run_thermo_integration.py    # traces.csv    -> log_z_mcmc.csv
 python3 run_fep.py                   # FEP telescope -> log_z_fep.csv
+python3 run_fep_dense.py             # dense-ladder FEP (high-accuracy reference)
+python3 merge_baseline.py            #   -> data/log_z_fep_baseline.csv  (+ validation)
 python3 run_log_z_js.py              # JS + exact    -> log_z.csv + log_z_traces.csv
 python3 run_log_z_js_sweep.py        # JS sweep      -> log_z_js_sweep.csv
 python3 taylor/run_log_z_taylor.py   # Taylor        -> log_z_taylor.csv
@@ -57,6 +68,8 @@ per-step rates from `run_microbench.py` (MCMC/JS) and `run_microbench_fep.py`
 |---|---|
 | `ising.py` | single-site spin chain (Metropolis / Glauber × ground / uniform init) |
 | `run_fep.py` | FEP telescoping of log Z over the β-ladder, per (init, dynamics) |
+| `run_fep_dense.py` | dense-ladder FEP run used as the n>20 reference (glauber + ground init) |
+| `merge_baseline.py` | merge per-graph baseline partials + validate vs exact at n=16 |
 | `subgraphs.py` | JS 1990 subgraphs chain + `estimate_log_Z` (`step_n_mult` knob) |
 | `taylor/` | Barvinok / Patel-Regts coefficient extraction + activity-change adapter |
 | `plot.py` | reads CSVs, writes the combined HTML + per-graph PNGs |

@@ -55,6 +55,10 @@ LOG_Z_CSV = os.path.join(DATA_DIR, "log_z.csv")
 LOG_Z_JS_SWEEP_CSV = os.path.join(DATA_DIR, "log_z_js_sweep.csv")
 LOG_Z_MCMC_CSV = os.path.join(DATA_DIR, "log_z_mcmc.csv")
 LOG_Z_FEP_CSV = os.path.join(DATA_DIR, "log_z_fep.csv")
+# High-accuracy dense-ladder FEP run used as the n > EXACT_MAX_N reference
+# (Db=0.1 / 50 segments, COLLECT=2M, ground init, glauber).  Validated vs
+# exact at n=16: mean relative error ~2.7e-4 (max ~1.7e-3) over 200 anchors.
+LOG_Z_FEP_BASELINE_CSV = os.path.join(DATA_DIR, "log_z_fep_baseline.csv")
 LOG_Z_TAYLOR_CSV = os.path.join(DATA_DIR, "log_z_taylor.csv")
 # n above which brute-force exact is intractable; for these graphs the log-Z
 # relative-error reference is the FEP estimate (see main()).
@@ -1811,14 +1815,22 @@ def main():
     log_z_taylor = load_log_z_taylor(LOG_Z_TAYLOR_CSV)
 
     # Reference for log-Z relative error: brute-force exact where we have it
-    # (n <= EXACT_MAX_N), else the FEP telescoping estimate (no trapezoidal
-    # grid bias; validated vs exact at n=16).  The earlier long-Glauber
-    # thermo-integrated reference is NOT used -- it drifted ~18% at high beta.
-    FEP_REF_KEY = ("uniform", "glauber")     # high-temp Glauber FEP
+    # (n <= EXACT_MAX_N), else the dense-FEP baseline (Db=0.1, COLLECT=2M,
+    # ground+glauber; see LOG_Z_FEP_BASELINE_CSV).  Validated vs exact at n=16
+    # at mean rel err ~2.7e-4.  Fall back to the coarse FEP file only for
+    # cells the baseline didn't cover.  The earlier long-Glauber thermo-
+    # integrated reference is NOT used -- it drifted ~18% at high beta.
+    log_z_fep_baseline = load_log_z_fep(LOG_Z_FEP_BASELINE_CSV)
+    FEP_BASELINE_KEY = ("ground", "glauber")
+    FEP_FALLBACK_KEY = ("uniform", "glauber")
     for gid, h_map in log_z_fep.items():
         for h, beta_map in h_map.items():
             for beta, series in beta_map.items():
-                sl = series.get(FEP_REF_KEY) or next(iter(series.values()))
+                bl_series = (log_z_fep_baseline.get(gid, {})
+                             .get(h, {}).get(beta, {}))
+                sl = (bl_series.get(FEP_BASELINE_KEY)
+                      or series.get(FEP_FALLBACK_KEY)
+                      or next(iter(series.values())))
                 fep_final = float(sl[1][-1])
                 (log_z.setdefault(gid, {}).setdefault(h, {})
                     .setdefault(beta, {}).setdefault("exact", fep_final))

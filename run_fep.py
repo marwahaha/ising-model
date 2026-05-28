@@ -87,7 +87,15 @@ def segment_running_logmeanexp(G, n, edges, beta, h, dbeta, init, dynamics,
     online log-sum-exp accumulator (O(1) per sample).  Energy incremental."""
     rng = random.Random(seed)
     if init == "ground":
-        s0 = 1 if rng.random() < 0.5 else -1
+        # Align with sign(h) so the chain starts at the unique low-energy
+        # state when h != 0; at h=0 the two all-aligned states are degenerate
+        # ground states, pick one at random.
+        if h > 0:
+            s0 = 1
+        elif h < 0:
+            s0 = -1
+        else:
+            s0 = 1 if rng.random() < 0.5 else -1
         sigma = [s0] * n
     else:  # uniform
         sigma = [1 if rng.random() < 0.5 else -1 for _ in range(n)]

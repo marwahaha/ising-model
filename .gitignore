@@ -7,4 +7,14 @@ __pycache__/
 # Stray run logs and one-off backups
 data/*.log
 data/backup_before_rerun/
+data/*.bak
+data/baseline_partials/
+data/baseline_partials_v1/
+
+# Dense-FEP experiment outputs (only data/log_z_fep_baseline.csv is canonical)
+data/log_z_fep_dense_*.csv
+data/log_z_fep_db01_*.csv
+data/log_z_fep_coarse_*.csv
+data/log_z_fep_bidir_*.csv
+
 

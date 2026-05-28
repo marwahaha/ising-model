@@ -7,7 +7,8 @@ IsingChain takes a graph (adjacency dict), field strength h, inverse
 temperature beta, an initial distribution, and a dynamics rule.
 
 Initial distributions ("init" argument):
-  - "ground"  : uniform over the two all-aligned ground states
+  - "ground"  : all-aligned with sign(h) (the unique ground state for h != 0;
+                picked uniformly from {+1, -1} when h = 0)
   - "uniform" : uniform over all 2^|V| spin configurations
 
 Dynamics rules ("dynamics" argument):
@@ -43,8 +44,8 @@ class IsingChain:
                  dynamics: str = "metropolis"):
         """Build the chain on graph G at field h, inverse temperature beta.
 
-        init: "ground" (uniform over the two all-aligned ground states) or
-              "uniform" (each spin iid +-1 with prob 1/2).
+        init: "ground" (all spins aligned with sign(h); random tie-break at
+              h=0) or "uniform" (each spin iid +-1 with prob 1/2).
         dynamics: "metropolis" (propose-and-accept single-site flip) or
                   "glauber" (resample single site from its conditional given
                   neighbours).  See module docstring for details.
@@ -56,7 +57,17 @@ class IsingChain:
         self.rng = rng if rng is not None else random.Random()
 
         if init == "ground":
-            s = 1 if self.rng.random() < 0.5 else -1
+            # Align with sign(h) so the chain starts at the unique low-energy
+            # state when h != 0.  At h=0 the two all-aligned configurations are
+            # degenerate ground states and we pick one at random.  Before the
+            # fix this picked +/-1 uniformly even at h != 0, which left the
+            # chain stuck in the wrong basin at high beta.
+            if self.h > 0:
+                s = 1
+            elif self.h < 0:
+                s = -1
+            else:
+                s = 1 if self.rng.random() < 0.5 else -1
             self.sigma: Dict[Node, int] = {v: s for v in self.nodes}
         elif init == "uniform":
             self.sigma = {v: (1 if self.rng.random() < 0.5 else -1) for v in self.nodes}

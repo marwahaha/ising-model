@@ -18,7 +18,7 @@ first.
 Configuration is in the constants at the top of this file.
 
 Initial distributions ("init"):
-  - "ground"  : uniform over the two all-aligned ground states
+  - "ground"  : all spins aligned with sign(h) (uniform tie-break at h=0)
   - "uniform" : uniform over all 2^|V| spin configurations
 Dynamics rules ("dynamics"):
   - "metropolis" : propose flipping sigma_v; accept w.p. min(1, exp(-beta dE))
