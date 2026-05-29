@@ -25,11 +25,15 @@ ways and compare them in one interactive HTML:
 - **Taylor** — Barvinok / Patel-Regts deterministic truncation of `log Z(λ)`
   as a power series in the edge activity (Lee-Yang ⇒ zeros on |λ|=1, so the
   series converges for |λ| < 1).
-- **HTE (high-temperature expansion, h=0 only)** — graph-independent cycle
-  expansion: `log Z(β) ≈ |V|·log 2 + |E|·log cosh(β) + Σ_{k=3}^{K} f(k)·log(1+tanh(β)^k)`
-  with `f(k) = 2^k/(2k)`, the asymptotic expected count of k-cycles in a
-  random 3-regular graph. Plotted for K=3..n; diverges for β ≳ 0.5 once
-  K is large enough that f(k) overwhelms tanh(β)^k.
+- **HTE (high-temperature expansion, h=0 only)** — cycle expansion:
+  `log Z(β) ≈ |V|·log 2 + |E|·log cosh(β) + Σ_{k=3}^{K} f(k)·log(1+tanh(β)^k)`.
+  Two variants are plotted: **asym** uses `f(k) = 2^k/(2k)` (asymptotic
+  expected k-cycle count in random 3-regular graphs, graph-independent);
+  **exact f(3,4,5)** uses true per-graph cycle counts for k=3,4,5 (direct
+  enumeration, O(n·d^(k-1)) ≈ 90–340 µs for n=16–60) and asymptotic for
+  k≥6. Plotted for K=3..n; diverges for β ≳ 0.5 once K is large enough
+  that f(k) overwhelms tanh(β)^k. At small β the exact variant is 2–3
+  orders of magnitude more accurate than asymptotic.
 
 For n > 20 there is no tractable brute force, so the dense-ladder FEP
 baseline (`data/log_z_fep_baseline.csv`, see "MCMC FEP baseline" below) is
@@ -103,8 +107,10 @@ n ≤ 20, FEP otherwise):
   step-size refinements `step_n_mult ∈ {1, 4, 20}`.
 - **log Z (Taylor)** — truncation orders m ∈ {2,4,6,8,10} (naive, n ≤ 20) or
   {2,4,6} (insects, n > 20).
-- **log Z (HTE, h=0)** — high-temperature expansion at h=0; one curve per β,
-  x = truncation K from 3 to n; h ≠ 0 panels are blank.
+- **log Z (HTE, h=0)** — high-temperature expansion at h=0; two curves
+  per β (asym / exact f(3,4,5)), x = truncation K from 3 to n; h ≠ 0
+  panels are blank. Also drawn as two trace groups on the wall-time view,
+  with the exact variant carrying its measured cycle-count setup cost.
 - **log Z vs wall time** — all estimators on a measured wall-time x-axis.
 
 Init labels: **low-temp** = ground (all-aligned) start, **high-temp** =

@@ -311,8 +311,12 @@ def load_log_z_taylor(path: str
 
 
 def load_log_z_hte(path: str
-                   ) -> Dict[str, Dict[float, Dict[float, Dict[int, float]]]]:
-    """log_z_hte[graph_id][h][beta][K] = log_Z_hte.  Only h=0 has data."""
+                   ) -> Dict[str, Dict[float, Dict[float, Dict[str, Dict[int, float]]]]]:
+    """log_z_hte[graph_id][h][beta][variant][K] = log_Z_hte.
+
+    Variants: 'asym' (graph-independent, f(k)=2^k/(2k)) and 'exact'
+    (graph-specific via per-graph cycle counts for k=3,4,5; asymptotic
+    for k>=6).  Only h=0 has data."""
     out: Dict = {}
     if not os.path.exists(path):
         return out
@@ -322,9 +326,10 @@ def load_log_z_hte(path: str
             h = float(row["h"])
             beta = float(row["beta"])
             K = int(row["K"])
+            variant = row.get("variant", "asym")
             lz = float(row["log_Z"])
-            (out.setdefault(gid, {}).setdefault(h, {})
-                .setdefault(beta, {})[K]) = lz
+            (out.setdefault(gid, {}).setdefault(h, {}).setdefault(beta, {})
+                .setdefault(variant, {})[K]) = lz
     return out
 
 
@@ -975,11 +980,43 @@ def _fep_us_per_step(n: int) -> Dict[str, float]:
     return FEP_US_PER_STEP_BY_N[nearest]
 
 
-def _hte_seconds(K: int) -> float:
-    """Estimated wall time for one HTE evaluation at truncation K (in
+def _hte_eval_seconds(K: int) -> float:
+    """Estimated wall time for ONE HTE evaluation at truncation K (in
     seconds).  Linear fit on Python timeit microbench: ~1 us overhead +
     0.35 us per added k (K=3 -> 1.5 us, K=60 -> 21.3 us)."""
     return 1e-6 * (1.0 + 0.35 * max(K - 2, 0))
+
+
+# Measured one-time overhead to enumerate 3-, 4-, 5-cycles on a 3-regular
+# graph of size n (Python, sum across all three k).  Linearly interpolate
+# between bench points; clamp outside.
+HTE_EXACT_SETUP_US_BY_N = {16: 87, 30: 164, 40: 223, 50: 272, 60: 337}
+
+
+def _hte_exact_setup_seconds(n: int) -> float:
+    sizes = sorted(HTE_EXACT_SETUP_US_BY_N)
+    if n <= sizes[0]:
+        return 1e-6 * HTE_EXACT_SETUP_US_BY_N[sizes[0]]
+    if n >= sizes[-1]:
+        return 1e-6 * HTE_EXACT_SETUP_US_BY_N[sizes[-1]]
+    for a, b in zip(sizes, sizes[1:]):
+        if a <= n <= b:
+            us_a = HTE_EXACT_SETUP_US_BY_N[a]
+            us_b = HTE_EXACT_SETUP_US_BY_N[b]
+            return 1e-6 * (us_a + (us_b - us_a) * (n - a) / (b - a))
+    return 1e-6 * HTE_EXACT_SETUP_US_BY_N[sizes[-1]]
+
+
+def _hte_seconds(K: int, n: int, variant: str) -> float:
+    """Total wall time for one HTE log_Z value at truncation K.  The
+    'exact' variant amortises the one-time cycle-count cost into the per-
+    point cost (since you'd typically want every K with the same counts);
+    here we conservatively add the setup once per point so the marker
+    placement is honest about the upfront work."""
+    base = _hte_eval_seconds(K)
+    if variant == "exact":
+        return base + _hte_exact_setup_seconds(n)
+    return base
 
 
 def _log_z_walltime_figure(graph_id: str, n: int,
@@ -1176,12 +1213,16 @@ def _log_z_walltime_figure(graph_id: str, n: int,
                     ),
                     row=row, col=col,
                 )
-            # HTE markers: h=0 only.  x = _hte_seconds(K), y = rel err or log Ẑ.
-            # One marker per K in {3..n}; tied as a line so the K-progression
-            # is visible on the wall-time axis.
+            # HTE markers: h=0 only.  Two variants (asym, exact); each gets
+            # a separate line.  x = _hte_seconds(K, n, variant), y = rel err
+            # or log Ẑ.  asym uses formula cost only; exact also pays the
+            # one-time cycle-count setup.
             if h == 0.0:
-                kmap = log_z_hte_for_graph.get(h, {}).get(beta, {})
-                if kmap:
+                variant_map = log_z_hte_for_graph.get(h, {}).get(beta, {})
+                for variant in ("asym", "exact"):
+                    kmap = variant_map.get(variant)
+                    if not kmap:
+                        continue
                     xs, ys, hovers = [], [], []
                     for K in sorted(kmap.keys()):
                         lz = kmap[K]
@@ -1191,27 +1232,33 @@ def _log_z_walltime_figure(graph_id: str, n: int,
                             yv = max(abs(lz - exact_lz) / denom, 1e-12)
                         else:
                             yv = lz
-                        xs.append(_hte_seconds(K))
+                        wall_s = _hte_seconds(K, n, variant)
+                        xs.append(wall_s)
                         ys.append(yv)
                         hovers.append(
-                            f"<b>HTE β={beta}, h=0</b><br>K = {K}<br>"
-                            f"est wall = {_hte_seconds(K)*1e6:.2f} µs<br>"
+                            f"<b>HTE ({HTE_VARIANT_LABEL[variant]}) β={beta}, "
+                            f"h=0</b><br>K = {K}<br>"
+                            f"est wall = {wall_s*1e6:.1f} µs<br>"
                             f"log Ẑ = {lz:.4f}"
                         )
-                    if xs:
-                        group = f"beta={beta} src=hte"
-                        fig.add_trace(
-                            go.Scatter(
-                                x=xs, y=ys, mode="lines+markers",
-                                name=f"HTE β={beta}",
-                                legendgroup=group, showlegend=is_first,
-                                line=dict(color=color, width=0.9, dash="dash"),
-                                marker=dict(color=color, size=8, symbol="triangle-up",
-                                            line=dict(color="white", width=1.0)),
-                                hovertext=hovers, hoverinfo="text",
-                            ),
-                            row=row, col=col,
-                        )
+                    if not xs:
+                        continue
+                    fig.add_trace(
+                        go.Scatter(
+                            x=xs, y=ys, mode="lines+markers",
+                            name=f"HTE β={beta} ({HTE_VARIANT_LABEL[variant]})",
+                            legendgroup=f"beta={beta} src=hte_{variant}",
+                            showlegend=is_first,
+                            line=dict(color=color, width=0.9,
+                                      dash=HTE_VARIANT_DASH[variant]),
+                            marker=dict(color=color, size=8,
+                                        symbol=("triangle-up" if variant == "exact"
+                                                else "triangle-up-open"),
+                                        line=dict(color=color, width=1.0)),
+                            hovertext=hovers, hoverinfo="text",
+                        ),
+                        row=row, col=col,
+                    )
         fig.update_xaxes(type="log",
                          title_text="estimated wall time (s)",
                          row=row, col=col)
@@ -1228,7 +1275,9 @@ def _log_z_walltime_figure(graph_id: str, n: int,
             + f" vs estimated wall time (n={n} rates) — MCMC thermo "
             f"({rates['metropolis']:.2f}/{rates['glauber']:.2f} µs/step "
             f"Metro/Glauber); JS FPRAS ({rates['js']:.2f} µs/step); "
-            "Taylor uses measured runtime; HTE ~1 µs + 0.35 µs/K, h=0 only"),
+            "Taylor uses measured runtime; HTE asym ~1 µs + 0.35 µs/K, "
+            f"HTE exact adds ~{int(HTE_EXACT_SETUP_US_BY_N.get(min(HTE_EXACT_SETUP_US_BY_N, key=lambda k: abs(k - n)), 0))} µs "
+            "cycle-count setup (n-dependent); h=0 only"),
             x=0.5, xanchor="center", font=dict(size=11)),
         height=320 * nrows + 120,
         hovermode="closest",
@@ -1241,17 +1290,21 @@ def _log_z_walltime_figure(graph_id: str, n: int,
     return fig, has_exact
 
 
+HTE_VARIANT_DASH = {"asym": "dot", "exact": "solid"}
+HTE_VARIANT_LABEL = {"asym": "asym f(k)", "exact": "exact f(3,4,5)"}
+
+
 def _log_z_hte_figure(graph_id: str, n: int,
-                      log_z_hte_for_graph: Dict[float, Dict[float, Dict[int, float]]],
+                      log_z_hte_for_graph: Dict[float, Dict[float, Dict[str, Dict[int, float]]]],
                       log_z_for_graph: Dict[float, Dict[float, Dict[str, float]]],
                       betas: List[float], h_values: List[float],
                       show_rel: bool) -> go.Figure:
-    """High-temperature expansion (HTE) truncation: one curve per beta at
-    h=0, x = K (truncation).  show_rel=False -> raw log Ẑ_HTE vs K;
-    show_rel=True -> relative error vs the reference (exact for
-    n<=EXACT_MAX_N, dense FEP baseline otherwise).  HTE is graph-
-    independent at fixed n (depends only on |V|, |E|), so identical curves
-    appear under every same-n graph.  h != 0 panels are left blank."""
+    """High-temperature expansion (HTE) truncation: two curves per beta at
+    h=0 (asym vs exact f(3,4,5)), x = K (truncation).  show_rel=False ->
+    raw log Ẑ_HTE vs K; show_rel=True -> relative error vs the reference
+    (exact for n<=EXACT_MAX_N, dense FEP baseline otherwise).  asym is
+    graph-independent; exact uses per-graph cycle counts for k=3,4,5 (and
+    asymptotic for k>=6).  h != 0 panels are left blank."""
     has_exact = show_rel
     ref_name = "exact log Z" if n <= EXACT_MAX_N else "FEP baseline"
     ncols = 3
@@ -1273,51 +1326,58 @@ def _log_z_hte_figure(graph_id: str, n: int,
                 fig.update_yaxes(title_text="log Ẑ", row=row, col=col)
             continue
         h_data = log_z_hte_for_graph.get(h, {})
-        # Build one curve per beta.  Each curve has one point per K (we
-        # only run K_short=3 and K_log=round(2 ln n), so curves are short).
         for b_idx, beta in enumerate(betas):
-            kmap = h_data.get(beta)
-            if not kmap:
+            variant_map = h_data.get(beta, {})
+            if not variant_map:
                 continue
-            ks_sorted = sorted(kmap.keys())
-            xs, ys, hovers = [], [], []
             ref = log_z_for_graph.get(h, {}).get(beta, {}).get("exact")
-            for K in ks_sorted:
-                lz = kmap[K]
-                if has_exact:
-                    if ref is None:
-                        continue
-                    denom = abs(ref) if abs(ref) > 1e-12 else 1.0
-                    rel = abs(lz - ref) / denom
-                    if rel <= 0:
-                        continue
-                    y = max(rel, 1e-15)
-                else:
-                    y = lz
-                xs.append(K)
-                ys.append(y)
-                hovers.append(
-                    f"<b>β={beta}, h=0</b><br>"
-                    f"K = {K}<br>"
-                    f"log Ẑ_HTE = {lz:.4f}<br>"
-                    + (f"reference log Z = {ref:.4f}<br>" if ref is not None else "")
-                    + (f"|rel err| = {abs(lz - ref) / max(abs(ref), 1e-12):.2e}"
-                       if ref is not None else "")
-                )
-            if not xs:
-                continue
             color = PLOTLY_COLORS[b_idx % len(PLOTLY_COLORS)]
-            fig.add_trace(
-                go.Scatter(
-                    x=xs, y=ys, mode="lines+markers", name=f"β={beta}",
-                    legendgroup=f"beta={beta}", showlegend=is_first,
-                    line=dict(color=color, width=1.6),
-                    marker=dict(color=color, size=8,
-                                line=dict(color="white", width=1)),
-                    hovertext=hovers, hoverinfo="text",
-                ),
-                row=row, col=col,
-            )
+            for variant in ("asym", "exact"):
+                kmap = variant_map.get(variant)
+                if not kmap:
+                    continue
+                ks_sorted = sorted(kmap.keys())
+                xs, ys, hovers = [], [], []
+                for K in ks_sorted:
+                    lz = kmap[K]
+                    if has_exact:
+                        if ref is None:
+                            continue
+                        denom = abs(ref) if abs(ref) > 1e-12 else 1.0
+                        rel = abs(lz - ref) / denom
+                        if rel <= 0:
+                            continue
+                        y = max(rel, 1e-15)
+                    else:
+                        y = lz
+                    xs.append(K)
+                    ys.append(y)
+                    hovers.append(
+                        f"<b>β={beta}, h=0 ({HTE_VARIANT_LABEL[variant]})</b><br>"
+                        f"K = {K}<br>"
+                        f"log Ẑ_HTE = {lz:.4f}<br>"
+                        + (f"reference log Z = {ref:.4f}<br>" if ref is not None else "")
+                        + (f"|rel err| = {abs(lz - ref) / max(abs(ref), 1e-12):.2e}"
+                           if ref is not None else "")
+                    )
+                if not xs:
+                    continue
+                fig.add_trace(
+                    go.Scatter(
+                        x=xs, y=ys, mode="lines+markers",
+                        name=f"β={beta} ({HTE_VARIANT_LABEL[variant]})",
+                        legendgroup=f"beta={beta} var={variant}",
+                        showlegend=is_first,
+                        line=dict(color=color, width=1.6,
+                                  dash=HTE_VARIANT_DASH[variant]),
+                        marker=dict(color=color, size=8,
+                                    symbol=("circle" if variant == "exact"
+                                            else "circle-open"),
+                                    line=dict(color=color, width=1)),
+                        hovertext=hovers, hoverinfo="text",
+                    ),
+                    row=row, col=col,
+                )
         fig.update_xaxes(title_text="truncation K", row=row, col=col)
         if has_exact:
             fig.update_yaxes(type="log",
@@ -1329,11 +1389,11 @@ def _log_z_hte_figure(graph_id: str, n: int,
         title=dict(text=(f"High-temperature expansion (HTE), {graph_id}, n={n} — "
                          + (f"relative error vs {ref_name}" if has_exact
                             else "raw log Ẑ")
-                         + "; f(k)=2^k/(2k), h=0 only"),
+                         + "; open markers = asym, filled = exact f(3,4,5); h=0 only"),
                    x=0.5, xanchor="center", font=dict(size=11)),
         height=320 * nrows + 120,
         hovermode="closest", dragmode="pan",
-        legend=dict(title="β", itemsizing="constant",
+        legend=dict(title="β / variant", itemsizing="constant",
                     bgcolor="rgba(255,255,255,0.92)",
                     groupclick="togglegroup"),
         template="plotly_white",
@@ -1560,15 +1620,23 @@ lines connect runs at the same β.  Dash style encodes the schedule step
 x = total FPRAS chain steps = <code>n_segments × (burnin + samples_per_segment)</code>.
 Schedule-length table below the chart.</li>
 <li><b>log Z (HTE, h=0)</b> — high-temperature (cycle) expansion at h=0:
-<code>log Z(β) ≈ |V|·log 2 + |E|·log cosh(β) + Σ<sub>k=3</sub><sup>K</sup> f(k)·log(1+tanh(β)<sup>k</sup>)</code>,
-with <code>f(k) = 2<sup>k</sup>/(2k)</code> — the asymptotic expected number
-of <i>k</i>-cycles in a random 3-regular graph.  Graph-independent at fixed
-<i>n</i>; only depends on <i>n</i> and <i>|E|</i>.  We sweep every integer
-truncation <code>K = 3, 4, …, n</code>.  At <i>β ≳ 0.5</i> the series
-formally diverges because <code>f(k) ~ 2<sup>k</sup></code> overwhelms
-<code>tanh(β)<sup>k</sup></code> once <i>k</i> is large; so the rel-err
-curves blow up past <i>K ≈ log n</i> at high β — the truncation choice
-matters.  x = K, one curve per β; h ≠ 0 panels are blank.</li>
+<code>log Z(β) ≈ |V|·log 2 + |E|·log cosh(β) + Σ<sub>k=3</sub><sup>K</sup> f(k)·log(1+tanh(β)<sup>k</sup>)</code>.
+Two variants are plotted (one curve per β per variant):
+<ul>
+<li><b>asym</b> (open markers, dotted): <code>f(k) = 2<sup>k</sup>/(2k)</code> for
+all k ≥ 3 — the asymptotic expected number of <i>k</i>-cycles in a random
+3-regular graph; graph-independent at fixed <i>n</i>.</li>
+<li><b>exact f(3,4,5)</b> (filled markers, solid): <i>f</i>(<i>k</i>) for
+<i>k</i> = 3, 4, 5 set to the true per-graph cycle counts (direct
+enumeration, <i>O(n·d<sup>k−1</sup>)</i>); asymptotic for <i>k</i> ≥ 6.</li>
+</ul>
+We sweep every integer truncation <code>K = 3, 4, …, n</code>.  At
+<i>β ≳ 0.5</i> the series formally diverges because <code>f(k) ~ 2<sup>k</sup></code>
+overwhelms <code>tanh(β)<sup>k</sup></code> once <i>k</i> is large; so the
+rel-err curves blow up past <i>K ≈ log n</i> at high β.  At small β the
+exact variant is dramatically better (often 2–3 orders of magnitude) since
+the per-graph cycle counts pin down the leading corrections.  x = K, two
+curves per β; h ≠ 0 panels are blank.</li>
 <li><b>log Z (Taylor)</b> — deterministic truncation of
 <code>log Z(λ)</code> as a polynomial in the edge activity, using the
 Barvinok / Patel-Regts approach.  x = truncation order m; one curve per

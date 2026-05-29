@@ -20,3 +20,5 @@ data/log_z_fep_coarse_*.csv
 explore_hte.py
 explore_hte_plot.py
 hte_error_vs_K.png
+explore_hte_tri.py
+explore_hte_cycles.py
