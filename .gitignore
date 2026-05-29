@@ -16,3 +16,7 @@ data/log_z_fep_db01_*.csv
 data/log_z_fep_coarse_*.csv
 
 
+# Scratch HTE exploration (not part of the production pipeline)
+explore_hte.py
+explore_hte_plot.py
+hte_error_vs_K.png

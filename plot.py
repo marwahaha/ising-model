@@ -60,6 +60,7 @@ LOG_Z_FEP_CSV = os.path.join(DATA_DIR, "log_z_fep.csv")
 # exact at n=16: mean relative error ~2.7e-4 (max ~1.7e-3) over 200 anchors.
 LOG_Z_FEP_BASELINE_CSV = os.path.join(DATA_DIR, "log_z_fep_baseline.csv")
 LOG_Z_TAYLOR_CSV = os.path.join(DATA_DIR, "log_z_taylor.csv")
+LOG_Z_HTE_CSV = os.path.join(DATA_DIR, "log_z_hte.csv")
 # n above which brute-force exact is intractable; for these graphs the log-Z
 # relative-error reference is the FEP estimate (see main()).
 EXACT_MAX_N = 20
@@ -306,6 +307,24 @@ def load_log_z_taylor(path: str
             for beta in out[gid][h]:
                 for method in out[gid][h][beta]:
                     out[gid][h][beta][method].sort(key=lambda r: r["m"])
+    return out
+
+
+def load_log_z_hte(path: str
+                   ) -> Dict[str, Dict[float, Dict[float, Dict[int, float]]]]:
+    """log_z_hte[graph_id][h][beta][K] = log_Z_hte.  Only h=0 has data."""
+    out: Dict = {}
+    if not os.path.exists(path):
+        return out
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            gid = row["graph_id"]
+            h = float(row["h"])
+            beta = float(row["beta"])
+            K = int(row["K"])
+            lz = float(row["log_Z"])
+            (out.setdefault(gid, {}).setdefault(h, {})
+                .setdefault(beta, {})[K]) = lz
     return out
 
 
@@ -956,20 +975,29 @@ def _fep_us_per_step(n: int) -> Dict[str, float]:
     return FEP_US_PER_STEP_BY_N[nearest]
 
 
+def _hte_seconds(K: int) -> float:
+    """Estimated wall time for one HTE evaluation at truncation K (in
+    seconds).  Linear fit on Python timeit microbench: ~1 us overhead +
+    0.35 us per added k (K=3 -> 1.5 us, K=60 -> 21.3 us)."""
+    return 1e-6 * (1.0 + 0.35 * max(K - 2, 0))
+
+
 def _log_z_walltime_figure(graph_id: str, n: int,
                            log_z_mcmc_for_graph: Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]],
                            log_z_fep_for_graph: Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]],
                            log_z_js_sweep_for_graph: Dict[float, Dict[float, Dict[int, List[Dict]]]],
                            log_z_final_for_graph: Dict[float, Dict[float, Dict[str, float]]],
                            log_z_taylor_for_graph: Dict[float, Dict[float, Dict[str, List[Dict]]]],
+                           log_z_hte_for_graph: Dict[float, Dict[float, Dict[int, float]]],
                            betas: List[float], h_values: List[float],
                            inits: List[str], dyns: List[str],
                            show_rel: bool) -> Tuple[go.Figure, bool]:
     """All estimators on a fair wall-time x-axis: MCMC thermo lines, MCMC FEP
-    lines (markers), FPRAS markers, Taylor markers.  MCMC/FEP/JS step counts
-    are converted to seconds via microbenched per-step rates; Taylor uses its
-    measured runtime.  show_rel=False -> raw log Ẑ; show_rel=True -> relative
-    error vs the reference (exact log Z for n<=EXACT_MAX_N, FEP otherwise)."""
+    lines (markers), FPRAS markers, Taylor markers, HTE markers (h=0 only,
+    timed by _hte_seconds(K)).  MCMC/FEP/JS step counts are converted to
+    seconds via microbenched per-step rates; Taylor uses its measured
+    runtime.  show_rel=False -> raw log Ẑ; show_rel=True -> relative error
+    vs the reference (exact log Z for n<=EXACT_MAX_N, FEP otherwise)."""
     has_exact = show_rel
     ref_name = "exact log Z" if n <= EXACT_MAX_N else "FEP reference"
     rates = _us_per_step(n)
@@ -1148,6 +1176,42 @@ def _log_z_walltime_figure(graph_id: str, n: int,
                     ),
                     row=row, col=col,
                 )
+            # HTE markers: h=0 only.  x = _hte_seconds(K), y = rel err or log Ẑ.
+            # One marker per K in {3..n}; tied as a line so the K-progression
+            # is visible on the wall-time axis.
+            if h == 0.0:
+                kmap = log_z_hte_for_graph.get(h, {}).get(beta, {})
+                if kmap:
+                    xs, ys, hovers = [], [], []
+                    for K in sorted(kmap.keys()):
+                        lz = kmap[K]
+                        if has_exact:
+                            if exact_lz is None:
+                                continue
+                            yv = max(abs(lz - exact_lz) / denom, 1e-12)
+                        else:
+                            yv = lz
+                        xs.append(_hte_seconds(K))
+                        ys.append(yv)
+                        hovers.append(
+                            f"<b>HTE β={beta}, h=0</b><br>K = {K}<br>"
+                            f"est wall = {_hte_seconds(K)*1e6:.2f} µs<br>"
+                            f"log Ẑ = {lz:.4f}"
+                        )
+                    if xs:
+                        group = f"beta={beta} src=hte"
+                        fig.add_trace(
+                            go.Scatter(
+                                x=xs, y=ys, mode="lines+markers",
+                                name=f"HTE β={beta}",
+                                legendgroup=group, showlegend=is_first,
+                                line=dict(color=color, width=0.9, dash="dash"),
+                                marker=dict(color=color, size=8, symbol="triangle-up",
+                                            line=dict(color="white", width=1.0)),
+                                hovertext=hovers, hoverinfo="text",
+                            ),
+                            row=row, col=col,
+                        )
         fig.update_xaxes(type="log",
                          title_text="estimated wall time (s)",
                          row=row, col=col)
@@ -1164,7 +1228,7 @@ def _log_z_walltime_figure(graph_id: str, n: int,
             + f" vs estimated wall time (n={n} rates) — MCMC thermo "
             f"({rates['metropolis']:.2f}/{rates['glauber']:.2f} µs/step "
             f"Metro/Glauber); JS FPRAS ({rates['js']:.2f} µs/step); "
-            "Taylor uses measured runtime"),
+            "Taylor uses measured runtime; HTE ~1 µs + 0.35 µs/K, h=0 only"),
             x=0.5, xanchor="center", font=dict(size=11)),
         height=320 * nrows + 120,
         hovermode="closest",
@@ -1175,6 +1239,106 @@ def _log_z_walltime_figure(graph_id: str, n: int,
         template="plotly_white",
     )
     return fig, has_exact
+
+
+def _log_z_hte_figure(graph_id: str, n: int,
+                      log_z_hte_for_graph: Dict[float, Dict[float, Dict[int, float]]],
+                      log_z_for_graph: Dict[float, Dict[float, Dict[str, float]]],
+                      betas: List[float], h_values: List[float],
+                      show_rel: bool) -> go.Figure:
+    """High-temperature expansion (HTE) truncation: one curve per beta at
+    h=0, x = K (truncation).  show_rel=False -> raw log Ẑ_HTE vs K;
+    show_rel=True -> relative error vs the reference (exact for
+    n<=EXACT_MAX_N, dense FEP baseline otherwise).  HTE is graph-
+    independent at fixed n (depends only on |V|, |E|), so identical curves
+    appear under every same-n graph.  h != 0 panels are left blank."""
+    has_exact = show_rel
+    ref_name = "exact log Z" if n <= EXACT_MAX_N else "FEP baseline"
+    ncols = 3
+    nrows = math.ceil(len(h_values) / ncols)
+    titles = [f"h = {h}" + (" (HTE: h=0 only)" if h != 0 else "")
+              for h in h_values] + [""] * (nrows * ncols - len(h_values))
+    fig = make_subplots(rows=nrows, cols=ncols, subplot_titles=titles,
+                        horizontal_spacing=0.07, vertical_spacing=0.14)
+    for h_idx, h in enumerate(h_values):
+        row, col = h_idx // ncols + 1, h_idx % ncols + 1
+        is_first = (h_idx == 0)
+        if h != 0.0:
+            fig.update_xaxes(title_text="truncation K", row=row, col=col)
+            if has_exact:
+                fig.update_yaxes(type="log",
+                                 title_text="|log Ẑ − log Z| / |log Z|",
+                                 row=row, col=col)
+            else:
+                fig.update_yaxes(title_text="log Ẑ", row=row, col=col)
+            continue
+        h_data = log_z_hte_for_graph.get(h, {})
+        # Build one curve per beta.  Each curve has one point per K (we
+        # only run K_short=3 and K_log=round(2 ln n), so curves are short).
+        for b_idx, beta in enumerate(betas):
+            kmap = h_data.get(beta)
+            if not kmap:
+                continue
+            ks_sorted = sorted(kmap.keys())
+            xs, ys, hovers = [], [], []
+            ref = log_z_for_graph.get(h, {}).get(beta, {}).get("exact")
+            for K in ks_sorted:
+                lz = kmap[K]
+                if has_exact:
+                    if ref is None:
+                        continue
+                    denom = abs(ref) if abs(ref) > 1e-12 else 1.0
+                    rel = abs(lz - ref) / denom
+                    if rel <= 0:
+                        continue
+                    y = max(rel, 1e-15)
+                else:
+                    y = lz
+                xs.append(K)
+                ys.append(y)
+                hovers.append(
+                    f"<b>β={beta}, h=0</b><br>"
+                    f"K = {K}<br>"
+                    f"log Ẑ_HTE = {lz:.4f}<br>"
+                    + (f"reference log Z = {ref:.4f}<br>" if ref is not None else "")
+                    + (f"|rel err| = {abs(lz - ref) / max(abs(ref), 1e-12):.2e}"
+                       if ref is not None else "")
+                )
+            if not xs:
+                continue
+            color = PLOTLY_COLORS[b_idx % len(PLOTLY_COLORS)]
+            fig.add_trace(
+                go.Scatter(
+                    x=xs, y=ys, mode="lines+markers", name=f"β={beta}",
+                    legendgroup=f"beta={beta}", showlegend=is_first,
+                    line=dict(color=color, width=1.6),
+                    marker=dict(color=color, size=8,
+                                line=dict(color="white", width=1)),
+                    hovertext=hovers, hoverinfo="text",
+                ),
+                row=row, col=col,
+            )
+        fig.update_xaxes(title_text="truncation K", row=row, col=col)
+        if has_exact:
+            fig.update_yaxes(type="log",
+                             title_text="|log Ẑ − log Z| / |log Z|",
+                             row=row, col=col)
+        else:
+            fig.update_yaxes(title_text="log Ẑ", row=row, col=col)
+    fig.update_layout(
+        title=dict(text=(f"High-temperature expansion (HTE), {graph_id}, n={n} — "
+                         + (f"relative error vs {ref_name}" if has_exact
+                            else "raw log Ẑ")
+                         + "; f(k)=2^k/(2k), h=0 only"),
+                   x=0.5, xanchor="center", font=dict(size=11)),
+        height=320 * nrows + 120,
+        hovermode="closest", dragmode="pan",
+        legend=dict(title="β", itemsizing="constant",
+                    bgcolor="rgba(255,255,255,0.92)",
+                    groupclick="togglegroup"),
+        template="plotly_white",
+    )
+    return fig
 
 
 def _log_z_taylor_figure(graph_id: str, n: int,
@@ -1395,6 +1559,16 @@ lines connect runs at the same β.  Dash style encodes the schedule step
 (<code>1/n</code> solid, <code>1/(4n)</code> dashed, <code>1/(20n)</code> dotted).
 x = total FPRAS chain steps = <code>n_segments × (burnin + samples_per_segment)</code>.
 Schedule-length table below the chart.</li>
+<li><b>log Z (HTE, h=0)</b> — high-temperature (cycle) expansion at h=0:
+<code>log Z(β) ≈ |V|·log 2 + |E|·log cosh(β) + Σ<sub>k=3</sub><sup>K</sup> f(k)·log(1+tanh(β)<sup>k</sup>)</code>,
+with <code>f(k) = 2<sup>k</sup>/(2k)</code> — the asymptotic expected number
+of <i>k</i>-cycles in a random 3-regular graph.  Graph-independent at fixed
+<i>n</i>; only depends on <i>n</i> and <i>|E|</i>.  We sweep every integer
+truncation <code>K = 3, 4, …, n</code>.  At <i>β ≳ 0.5</i> the series
+formally diverges because <code>f(k) ~ 2<sup>k</sup></code> overwhelms
+<code>tanh(β)<sup>k</sup></code> once <i>k</i> is large; so the rel-err
+curves blow up past <i>K ≈ log n</i> at high β — the truncation choice
+matters.  x = K, one curve per β; h ≠ 0 panels are blank.</li>
 <li><b>log Z (Taylor)</b> — deterministic truncation of
 <code>log Z(λ)</code> as a polynomial in the edge activity, using the
 Barvinok / Patel-Regts approach.  x = truncation order m; one curve per
@@ -1526,6 +1700,7 @@ CONTROLS_HTML_TEMPLATE = """
     <label><input type="radio" name="viewsel" value="logz_fep"> log Z (MCMC FEP)</label>
     <label><input type="radio" name="viewsel" value="logz_js_sweep"> log Z (Jerrum-Sinclair)</label>
     <label><input type="radio" name="viewsel" value="logz_taylor"> log Z (Taylor)</label>
+    <label><input type="radio" name="viewsel" value="logz_hte"> log Z (HTE, h=0)</label>
     <label><input type="radio" name="viewsel" value="logz_walltime"> log Z vs wall time</label>
   </fieldset>
   <fieldset id="ctl-graph">
@@ -1581,7 +1756,7 @@ CONTROLS_SCRIPT = """
   }
   // Init/dyn filters apply in any view that contains MCMC traces.
   const VIEWS_WITH_INIT_DYN = new Set(['energy', 'logz_mcmc', 'logz_fep', 'logz_walltime']);
-  const PLOT_PREFIXES = ['convfig-', 'logzmcmcfig-', 'logzfepfig-', 'logzfig-', 'logzwalltimefig-', 'logztaylorfig-'];
+  const PLOT_PREFIXES = ['convfig-', 'logzmcmcfig-', 'logzfepfig-', 'logzfig-', 'logzwalltimefig-', 'logztaylorfig-', 'logzhtefig-'];
 
   function ensureRendered(div) {
     if (!div || div.data) return;  // already rendered
@@ -1692,6 +1867,7 @@ def _make_section(graph_id: str, n: int, G_nx: nx.Graph, graph_data: Dict,
                   log_z_mcmc_for_graph: Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]],
                   log_z_fep_for_graph: Dict[float, Dict[float, Tuple[np.ndarray, np.ndarray]]],
                   log_z_taylor_for_graph: Dict[float, Dict[float, Dict[str, List[Dict]]]],
+                  log_z_hte_for_graph: Dict[float, Dict[float, Dict[int, float]]],
                   betas: List[float], h_values: List[float],
                   inits: List[str], dyns: List[str],
                   is_default_visible: bool) -> str:
@@ -1737,11 +1913,17 @@ def _make_section(graph_id: str, n: int, G_nx: nx.Graph, graph_data: Dict,
         lambda sr: _log_z_taylor_figure(
             graph_id, n, log_z_taylor_for_graph, betas, h_values,
             show_rel=sr)[0])
+    hte_wrap = _two_set(
+        "logz_hte", "logzhtefig",
+        lambda sr: _log_z_hte_figure(
+            graph_id, n, log_z_hte_for_graph, log_z_for_graph,
+            betas, h_values, show_rel=sr))
     walltime_wrap = _two_set(
         "logz_walltime", "logzwalltimefig",
         lambda sr: _log_z_walltime_figure(
             graph_id, n, log_z_mcmc_for_graph, log_z_fep_for_graph,
             log_z_js_sweep_for_graph, log_z_for_graph, log_z_taylor_for_graph,
+            log_z_hte_for_graph,
             betas, h_values, inits, dyns, show_rel=sr)[0])
 
     section_class = "graph-section" + ("" if is_default_visible else " hidden")
@@ -1749,7 +1931,7 @@ def _make_section(graph_id: str, n: int, G_nx: nx.Graph, graph_data: Dict,
         f'<section class="{section_class}" data-graph="{graph_id}">'
         f'<h2>{graph_id}  (3-regular, n={n})</h2>'
         + graph_wrap + conv_wrap + mcmc_wrap + fep_wrap
-        + js_wrap + taylor_wrap + walltime_wrap +
+        + js_wrap + taylor_wrap + hte_wrap + walltime_wrap +
         '</section>'
     )
 
@@ -1762,6 +1944,7 @@ def render_combined_html(out_path: str,
                          log_z_mcmc: Dict[str, Dict[float, Dict[float, Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]]]]],
                          log_z_fep: Dict[str, Dict[float, Dict[float, Tuple[np.ndarray, np.ndarray]]]],
                          log_z_taylor: Dict[str, Dict[float, Dict[float, Dict[str, List[Dict]]]]],
+                         log_z_hte: Dict[str, Dict[float, Dict[float, Dict[int, float]]]],
                          betas: List[float], h_values: List[float],
                          inits: List[str], dyns: List[str]) -> None:
     # Default-selected graph is the first one (n16_graph0 by ordering).
@@ -1793,6 +1976,7 @@ def render_combined_html(out_path: str,
             log_z.get(gid, {}), log_z_js_sweep.get(gid, {}),
             log_z_mcmc.get(gid, {}), log_z_fep.get(gid, {}),
             log_z_taylor.get(gid, {}),
+            log_z_hte.get(gid, {}),
             betas, h_values, inits, dyns,
             is_default_visible=(gid == default_selected),
         ))
@@ -1826,6 +2010,7 @@ def main():
     log_z_mcmc = load_log_z_mcmc(LOG_Z_MCMC_CSV)
     log_z_fep = load_log_z_fep(LOG_Z_FEP_CSV)
     log_z_taylor = load_log_z_taylor(LOG_Z_TAYLOR_CSV)
+    log_z_hte = load_log_z_hte(LOG_Z_HTE_CSV)
 
     # Reference for log-Z relative error: brute-force exact where we have it
     # (n <= EXACT_MAX_N), else the dense-FEP baseline (Db=0.1, COLLECT=2M,
@@ -1870,6 +2055,7 @@ def main():
     print(f"  log_z mcmc graphs:   {sorted(log_z_mcmc.keys())}")
     print(f"  log_z fep graphs:    {sorted(log_z_fep.keys())}")
     print(f"  log_z taylor:        {sorted(log_z_taylor.keys())}")
+    print(f"  log_z hte:           {sorted(log_z_hte.keys())}")
 
     # Per-graph PNG (archival).
     for graph_id in graph_ids:
@@ -1883,6 +2069,7 @@ def main():
     # One combined interactive page.
     render_combined_html(COMBINED_HTML, data, graph_ids, exact, log_z,
                          log_z_js_sweep, log_z_mcmc, log_z_fep, log_z_taylor,
+                         log_z_hte,
                          betas, h_values, inits, dyns)
     print(f"  wrote {COMBINED_HTML}")
 
