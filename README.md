@@ -31,9 +31,9 @@ ways and compare them in one interactive HTML:
   expected k-cycle count in random 3-regular graphs, graph-independent);
   **exact f(3,4,5)** uses true per-graph cycle counts for k=3,4,5 (direct
   enumeration, O(n·d^(k-1)) ≈ 90–340 µs for n=16–60) and asymptotic for
-  k≥6. Plotted for K=3..n; diverges for β ≳ 0.5 once K is large enough
-  that f(k) overwhelms tanh(β)^k. At small β the exact variant is 2–3
-  orders of magnitude more accurate than asymptotic.
+  k≥6. Plotted for K = 3..round(2·ln n); past that the series diverges
+  (f(k) ~ 2^k swamps tanh(β)^k) and we cut it off. At small β the exact
+  variant is 2–3 orders of magnitude more accurate than asymptotic.
 
 For n > 20 there is no tractable brute force, so the dense-ladder FEP
 baseline (`data/log_z_fep_baseline.csv`, see "MCMC FEP baseline" below) is
@@ -82,7 +82,7 @@ per-step rates from `run_microbench.py` (MCMC/JS) and `run_microbench_fep.py`
 | `merge_baseline.py` | merge per-graph baseline partials + validate vs exact at n=16 |
 | `subgraphs.py` | JS 1990 subgraphs chain + `estimate_log_Z` (`step_n_mult` knob) |
 | `taylor/` | Barvinok / Patel-Regts coefficient extraction + activity-change adapter |
-| `run_hte.py` | high-temperature (cycle) expansion at h=0, K = 3..n, with f(k) = 2^k/(2k) |
+| `run_hte.py` | high-temperature (cycle) expansion at h=0, K = 3..round(2·ln n), asym + exact f(3,4,5) |
 | `plot.py` | reads CSVs, writes the combined HTML + per-graph PNGs |
 
 ## Grid
@@ -108,9 +108,10 @@ n ≤ 20, FEP otherwise):
 - **log Z (Taylor)** — truncation orders m ∈ {2,4,6,8,10} (naive, n ≤ 20) or
   {2,4,6} (insects, n > 20).
 - **log Z (HTE, h=0)** — high-temperature expansion at h=0; two curves
-  per β (asym / exact f(3,4,5)), x = truncation K from 3 to n; h ≠ 0
-  panels are blank. Also drawn as two trace groups on the wall-time view,
-  with the exact variant carrying its measured cycle-count setup cost.
+  per β (asym / exact f(3,4,5)), x = truncation K from 3 to round(2·ln n);
+  h ≠ 0 panels are blank. Also drawn as two trace groups on the wall-time
+  view, with the exact variant carrying its measured cycle-count setup
+  cost.
 - **log Z vs wall time** — all estimators on a measured wall-time x-axis.
 
 Init labels: **low-temp** = ground (all-aligned) start, **high-temp** =

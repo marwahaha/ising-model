@@ -17,6 +17,10 @@ Two variants for f(k):
     asymptotic for k >= 6 (enumeration cost grows; gain is small once the
     series enters the divergent regime).  Graph-specific.
 
+K is swept from 3 to round(2 * ln n) -- past that the series diverges
+fast at moderate beta (f(k) ~ 2^k overwhelms tanh(beta)^k) and the curves
+become uninformative.
+
 Output: data/log_z_hte.csv
   columns: graph_id, n, h, beta, K, variant, log_Z
 """
@@ -157,9 +161,10 @@ def main() -> None:
             f_exact = {k: float(v) for k, v in exact.items()}
             print(f"{graph_id}: cycles (3,4,5) = "
                   f"({exact[3]}, {exact[4]}, {exact[5]})")
+            k_max = int(round(2.0 * math.log(n)))
             for h in H_VALUES:
                 for beta in BETAS:
-                    for K in range(3, n + 1):
+                    for K in range(3, k_max + 1):
                         lz_asym = hte_log_z(n, m, beta, K, f_override=None)
                         lz_exact = hte_log_z(n, m, beta, K, f_override=f_exact)
                         w.writerow([graph_id, n, f"{h:.1f}", f"{beta:.6g}",

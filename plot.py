@@ -1630,13 +1630,13 @@ all k ≥ 3 — the asymptotic expected number of <i>k</i>-cycles in a random
 <i>k</i> = 3, 4, 5 set to the true per-graph cycle counts (direct
 enumeration, <i>O(n·d<sup>k−1</sup>)</i>); asymptotic for <i>k</i> ≥ 6.</li>
 </ul>
-We sweep every integer truncation <code>K = 3, 4, …, n</code>.  At
-<i>β ≳ 0.5</i> the series formally diverges because <code>f(k) ~ 2<sup>k</sup></code>
-overwhelms <code>tanh(β)<sup>k</sup></code> once <i>k</i> is large; so the
-rel-err curves blow up past <i>K ≈ log n</i> at high β.  At small β the
-exact variant is dramatically better (often 2–3 orders of magnitude) since
-the per-graph cycle counts pin down the leading corrections.  x = K, two
-curves per β; h ≠ 0 panels are blank.</li>
+We sweep <code>K = 3, 4, …, round(2·ln n)</code>.  Past that the series
+formally diverges (<code>f(k) ~ 2<sup>k</sup></code> overwhelms
+<code>tanh(β)<sup>k</sup></code>) and the curves become uninformative, so
+we cut them off.  At small β the exact variant is dramatically better
+(often 2–3 orders of magnitude) since the per-graph cycle counts pin down
+the leading corrections.  x = K, two curves per β; h ≠ 0 panels are
+blank.</li>
 <li><b>log Z (Taylor)</b> — deterministic truncation of
 <code>log Z(λ)</code> as a polynomial in the edge activity, using the
 Barvinok / Patel-Regts approach.  x = truncation order m; one curve per
